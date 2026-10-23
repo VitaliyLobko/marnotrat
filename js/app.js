@@ -1680,7 +1680,37 @@ function viewSettings() {
         h('button', { type: 'button', class: 'btn', onClick: exportBackup }, icon('archive'), 'Зберегти копію'),
         h('button', { type: 'button', class: 'btn', onClick: () => file.click() }, icon('undo'), 'Відновити')),
       file),
+    h('section', { class: 'card set-card' },
+      h('h2', {}, 'Почати з чистого'),
+      h('p', { class: 'muted small' }, Sync.syncOn()
+        ? 'Стерти всі монети й операції — тут, на Google Диску й на інших твоїх телефонах. Лишаться стартові монети.'
+        : 'Стерти всі монети й операції на цьому телефоні. Лишаться стартові монети.'),
+      h('button', { type: 'button', class: 'btn danger', onClick: wipeAll }, icon('close'), 'Стерти всі дані')),
     aboutCard());
+}
+
+/**
+ * Стерти все: монети й операції видаляються звичайним save() — з надгробками, тож синхронізація
+ * стирає їх і на Диску, й на інших телефонах (просто очистити базу — Диск повернув би все назад).
+ * Замість стертих — стартові монети; курси й день початку місяця лишаються.
+ */
+function wipeAll() {
+  sheet('Стерти всі дані?', h('div', { class: 'form' },
+    h('p', {}, `Монет: ${state.coins.length}, операцій: ${state.ops.length} — буде стерто${Sync.syncOn() ? ' й на Google Диску' : ''}. Якщо дані ще знадобляться — спершу «Зберегти копію».`),
+    h('div', { class: 'btn-grid' },
+      h('button', {
+        type: 'button', class: 'btn danger', onClick: async () => {
+          closeSheet();
+          await save({
+            coins: { del: state.coins.map((c) => c.id), put: M.seedCoins(uid) },
+            ops: { del: state.ops.map((o) => o.id) },
+          });
+          await dropFilesExcept(new Set());
+          toast('Усе стерто');
+          go('main');
+        },
+      }, icon('close'), 'Стерти'),
+      h('button', { type: 'button', class: 'btn', onClick: () => closeSheet() }, 'Скасувати'))));
 }
 
 /** «Про застосунок»: автор, що воно таке, де дані, з чого почати — як у hobby-planner і shooting-log. */
