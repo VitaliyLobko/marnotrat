@@ -107,12 +107,13 @@ export const toExpr = (v) => (v ? String(round2(v)).replace('.', ',') : '');
 
 // ---------- монети ----------
 
-export const KINDS = { income: 'Дохід', account: 'Рахунок', expense: 'Витрата' };
+export const KINDS = { income: 'Дохід', account: 'Рахунок', expense: 'Витрата', goal: 'Ціль' };
 
 /** Стан витрати за бюджетом: колір монети й частка заливки (0–1). */
 export function budgetState(spent, budget) {
   if (!spent) return { st: 'zero', fill: 0 };
-  if (!budget) return { st: 'ok', fill: 1 };
+  // Без бюджету монета не заливається: «повна зелена» читалась би як «усе в нормі на 100 %»
+  if (!budget) return { st: 'free', fill: 0 };
   const share = spent / budget;
   if (share > 1) return { st: 'over', fill: 1 };
   return { st: share >= WARN_SHARE ? 'warn' : 'ok', fill: share };

@@ -1,6 +1,9 @@
 // Марнотрат: головна з монетами, екран суми, стрічка, звіти, налаштування.
 import { loadAll, write, uid, replaceAll } from './db.js';
 import * as M from './model.js';
+import * as Sync from './sync.js';
+import { demoChanges, demoRemoval, hasDemo } from './demo.js';
+import { CHANGES, changesSince } from './changes.js';
 import { $, h, icon, hasIcon, toast, sheet, closeSheet, chips, swipeStep, vibrate } from './ui.js';
 
 const state = { coins: [], ops: [], meta: [] };
@@ -13,7 +16,7 @@ let reportMonth = M.monthOf(M.ymd());
 let reportPick = null;
 let dayDate = M.ymd();
 // Оновлення застосунку: реєстрація service worker і нова версія, що чекає
-const upd = { reg: null, worker: null };
+const upd = { reg: null, worker: null, checked: '' };
 
 // Ключі localStorage — з префіксом: origin спільний із shooting-log, weight-log, hobby-planner
 const PREFIX = 'marnotrat:';
@@ -27,6 +30,9 @@ function recall(key) {
 }
 
 const coin = (id) => state.coins.find((c) => c.id === id);
+// Режим «Редагування» головної (довге натискання на монету): ✕ і ✎ на монетах, перестановка перетягуванням
+const editing = () => view === 'edit';
+const onMain = () => view === 'main' || view === 'edit';
 const MISSING = { name: 'Видалено', kind: 'expense', currency: 'UAH', icon: 'box' };
 const coinOr = (id) => coin(id) ?? MISSING;
 const coinsOf = (kind) => state.coins.filter((c) => c.kind === kind && !c.archived).sort((a, b) => a.order - b.order);
@@ -47,12 +53,59 @@ function opType(op) {
 const amountIn = (op) => op.amountTo ?? op.amount;
 
 async function save(changes, { redraw = true } = {}) {
+  // Видалення лишає надгробок — інакше синхронізація повернула б запис з іншого телефона
+  const tombs = Sync.tombsFor(changes);
+  if (tombs.length) changes = { ...changes, meta: { ...changes.meta, put: [...(changes.meta?.put ?? []), ...tombs] } };
   await write(changes);
   for (const [name, { put = [], del = [] }] of Object.entries(changes)) {
     const ids = new Set([...del, ...put.map((x) => x.id)]);
     state[name] = [...state[name].filter((x) => !ids.has(x.id)), ...put];
   }
   if (redraw) render();
+  scheduleSync();
+}
+
+// ---------- синхронізація з Google Диском ----------
+
+const snapshot = () => ({ coins: state.coins, ops: state.ops, meta: state.meta });
+const sync = { timer: 0, busy: false, again: false, error: '' };
+
+/** Після кожної зміни — за дві секунди, щоб серія правок пішла одним файлом. */
+function scheduleSync() {
+  if (!Sync.syncOn()) return;
+  clearTimeout(sync.timer);
+  sync.timer = setTimeout(() => runSync(), 2000);
+}
+
+/** Один прохід синхронізації. gesture — викликано з натискання: можна оновити ключ Google. */
+async function runSync({ gesture = false, loud = false } = {}) {
+  if (!Sync.syncOn() || !navigator.onLine) return;
+  if (sync.busy) { sync.again = true; return; }
+  sync.busy = true;
+  try {
+    if (loud) await Sync.ensureToken();
+    else if (!Sync.tokenValid() && !(gesture && await Sync.refreshByGesture())) return;
+    // Свого на цьому телефоні ще нічого — беремо Диск як є, без злиття стартових монет
+    const fresh = !Sync.lastSync() && !state.ops.some((o) => !o.demo);
+    const merged = await Sync.syncNow(snapshot(), { fresh, envelope: { version: self.APP_VERSION } });
+    sync.error = '';
+    if (merged) {
+      // Поки ходили на Диск, тут могли щось змінити — зливаємо ще раз зі свіжим станом
+      const final = fresh ? merged : Sync.merge(snapshot(), merged);
+      await replaceAll(final);
+      Object.assign(state, final);
+      if (Sync.stamp(final) !== Sync.stamp(merged)) sync.again = true;
+      render();
+    } else if (view === 'settings') render();
+    if (loud) toast('Синхронізовано з Google Диском');
+  } catch (err) {
+    sync.error = err.message;
+    if (loud) toast(err.message);
+    if (view === 'settings') render();
+  } finally {
+    sync.busy = false;
+    if (sync.again) { sync.again = false; scheduleSync(); }
+  }
 }
 
 // ---------- підрахунки ----------
@@ -78,10 +131,13 @@ function monthIncome(c, ym) {
 
 /** Як операція міняє гроші на рахунках, у гривнях: дохід +, витрата −, переказ — лише різниця курсів. */
 function accDelta(op) {
-  const t = opType(op);
-  if (t === 'income') return toUah(amountIn(op), coinOr(op.to).currency);
-  if (t === 'expense') return -toUah(op.amount, coinOr(op.from).currency);
-  return toUah(amountIn(op), coinOr(op.to).currency) - toUah(op.amount, coinOr(op.from).currency);
+  // Рахується лише те, що на рахунках: ціль — відкладене, у «Баланс» не входить
+  const src = coinOr(op.from);
+  const dst = coinOr(op.to);
+  let v = 0;
+  if (dst.kind === 'account') v += toUah(amountIn(op), dst.currency);
+  if (src.kind === 'account') v -= toUah(op.amount, src.currency);
+  return v;
 }
 
 /** Витрати й доходи за період у гривнях (date — день чи місяць «2026-10»). */
@@ -109,6 +165,33 @@ function headStats() {
   return h('div', { class: 'stats' }, stat('Баланс', totalBalance()), stat('Витрати', expense), stat('Доходи', income));
 }
 
+// Суми монет, показані востаннє: змінену після збереження «докручуємо» до нової
+const shownSums = new Map();
+const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function animateSums() {
+  for (const el of document.querySelectorAll('.coin-sum[data-from]')) {
+    const from = Number(el.dataset.from);
+    const to = Number(el.dataset.to);
+    const cur = el.dataset.cur;
+    el.closest('.coin')?.classList.add('bump');
+    const t0 = performance.now();
+    const step = (t) => {
+      const k = Math.min(1, (t - t0) / 450);
+      const e = 1 - (1 - k) ** 3;
+      el.textContent = M.money(k < 1 ? from + (to - from) * e : to, cur);
+      if (k < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+}
+
+/** Маленька монета для рядків і шапки екрана суми — того ж кольору, що на головній. */
+function miniCoin(c) {
+  const st = c.kind === 'expense' ? M.budgetState(monthSpent(c, M.monthOf(M.ymd())), c.budget).st : '';
+  return h('span', { class: `mini-coin k-${c.kind}${st ? ` st-${st}` : ''}`, 'aria-hidden': 'true' }, icon(hasIcon(c.icon) ? c.icon : 'coins'));
+}
+
 function coinEl(c, ym) {
   let sum;
   let sub = null;
@@ -119,6 +202,12 @@ function coinEl(c, ym) {
     if (c.budget) sub = M.num(c.budget);
   } else if (c.kind === 'account') {
     sum = balance(c);
+  } else if (c.kind === 'goal') {
+    // Ціль: відкладено / скільки треба; кільце — частка зібраного
+    sum = balance(c);
+    fill = c.budget ? Math.min(1, Math.max(0, sum / c.budget)) : 0;
+    if (c.budget) sub = M.num(c.budget);
+    if (c.budget && sum >= c.budget) st = 'done';
   } else {
     sum = monthSpent(c, ym);
     ({ st, fill } = M.budgetState(sum, c.budget));
@@ -130,9 +219,25 @@ function coinEl(c, ym) {
   const el = h('div', { class: `coin k-${c.kind}${st ? ` st-${st}` : ''}`, 'data-id': c.id, 'data-kind': c.kind },
     h('div', { class: 'coin-name' }, c.name),
     face,
-    h('div', { class: 'coin-sum' }, M.money(sum, c.currency)),
+    sumEl(c, sum),
     sub != null ? h('div', { class: 'coin-sub' }, sub) : null);
+  if (editing()) {
+    el.append(
+      h('button', { type: 'button', class: 'coin-x', 'aria-label': `Прибрати «${c.name}»`, onClick: () => removeCoin(c) }, icon('close')),
+      h('button', { type: 'button', class: 'coin-pen', 'aria-label': `Змінити «${c.name}»`, onClick: () => editCoin(c) }, icon('pen')));
+  }
   bindCoin(el, face, c);
+  return el;
+}
+
+function sumEl(c, sum) {
+  const prev = shownSums.get(c.id);
+  shownSums.set(c.id, sum);
+  const el = h('div', { class: 'coin-sum' }, M.money(sum, c.currency));
+  if (prev !== undefined && prev !== sum && !reduceMotion()) {
+    Object.assign(el.dataset, { from: String(prev), to: String(sum), cur: c.currency });
+    el.textContent = M.money(prev, c.currency);
+  }
   return el;
 }
 
@@ -142,13 +247,44 @@ function addCoinEl(kind) {
     h('div', { class: 'coin-face' }, icon('plus')));
 }
 
+// Сторінка ряду, на якій стояли: головна перемальовується після кожної операції
+const pagerAt = new Map();
+
+/**
+ * Ряд монет сторінками, що гортаються вбік (по perPage на сторінці), з крапками внизу.
+ * Одна сторінка — без крапок і без гортання.
+ */
+function pager(key, items, perPage, cls) {
+  const pages = [];
+  for (let i = 0; i < items.length; i += perPage) pages.push(items.slice(i, i + perPage));
+  const track = h('div', { class: 'pager-track', 'data-pager': key },
+    pages.map((list) => h('div', { class: 'pager-page coin-grid' }, list)));
+  const dots = pages.length > 1 ? h('div', { class: 'pager-dots', 'aria-hidden': 'true' }, pages.map(() => h('span'))) : null;
+  const paint = () => {
+    if (!dots) return;
+    const at = Math.round(track.scrollLeft / Math.max(1, track.clientWidth));
+    pagerAt.set(key, at);
+    [...dots.children].forEach((d, i) => d.classList.toggle('on', i === at));
+  };
+  track.addEventListener('scroll', paint, { passive: true });
+  // Повертаємо на ту саму сторінку, коли ряд уже в документі
+  requestAnimationFrame(() => {
+    const at = Math.min(pagerAt.get(key) ?? 0, pages.length - 1);
+    track.scrollLeft = at * track.clientWidth;
+    paint();
+  });
+  return h('div', { class: `pager ${cls}` }, track, dots);
+}
+
 function viewMain() {
   const ym = M.monthOf(M.ymd());
   const incomeOpen = recall('income-open') === '1';
-  return h('div', { class: 'main' },
-    incomeOpen ? h('div', { class: 'coin-row incomes' }, coinsOf('income').map((c) => coinEl(c, ym)), addCoinEl('income')) : null,
-    h('div', { class: 'coin-row accounts' }, coinsOf('account').map((c) => coinEl(c, ym)), addCoinEl('account')),
-    h('div', { class: 'coin-grid expenses' }, coinsOf('expense').map((c) => coinEl(c, ym)), addCoinEl('expense')),
+  // Цілі стоять у сітці витрат, як копилка
+  const grid = state.coins.filter((c) => (c.kind === 'expense' || c.kind === 'goal') && !c.archived).sort((a, b) => a.order - b.order);
+  return h('div', { class: `main${editing() ? ' editing' : ''}` },
+    incomeOpen ? pager('income', [...coinsOf('income').map((c) => coinEl(c, ym)), addCoinEl('income')], 4, 'coin-row incomes') : null,
+    pager('account', [...coinsOf('account').map((c) => coinEl(c, ym)), addCoinEl('account')], 4, 'coin-row accounts'),
+    pager('expense', [...grid.map((c) => coinEl(c, ym)), addCoinEl('expense')], 16, 'expenses'),
     state.ops.length ? null : h('p', { class: 'muted small main-hint' },
       'Тягни монету пальцем: дохід — на рахунок, рахунок — на витрату чи інший рахунок. Тап — історія монети, довге натискання — змінити.'));
 }
@@ -159,9 +295,42 @@ function viewMain() {
 function canDrop(src, dst) {
   if (!dst || src.id === dst.id) return false;
   if (src.kind === 'income') return dst.kind === 'account';
-  if (src.kind === 'account') return dst.kind === 'account' || dst.kind === 'expense';
+  if (src.kind === 'account') return dst.kind === 'account' || dst.kind === 'expense' || dst.kind === 'goal';
+  // З цілі — назад на рахунок
+  if (src.kind === 'goal') return dst.kind === 'account';
   return false;
 }
+
+// Ряд, у якому монету можна переставити: цілі стоять разом із витратами
+const rowOf = (c) => (c.kind === 'goal' ? 'expense' : c.kind);
+const canReorder = (src, dst) => Boolean(dst) && src.id !== dst.id && rowOf(src) === rowOf(dst);
+
+/** Перестановка: монета стає на місце тієї, на яку її кинули; решта ряду зсувається. */
+async function reorder(src, dstId) {
+  const list = state.coins.filter((c) => rowOf(c) === rowOf(src) && !c.archived).sort((a, b) => a.order - b.order);
+  const from = list.findIndex((c) => c.id === src.id);
+  const to = list.findIndex((c) => c.id === dstId);
+  if (from < 0 || to < 0) return;
+  list.splice(to, 0, list.splice(from, 1)[0]);
+  const put = list.map((c, i) => (c.order === i ? null : { ...c, order: i })).filter(Boolean);
+  if (put.length) await save({ coins: { put } });
+}
+
+/** ✕ на монеті: без операцій — видалити, з операціями — сховати (операції лишаються). */
+async function removeCoin(orig) {
+  const used = state.ops.some((op) => op.from === orig.id || op.to === orig.id);
+  if (used) {
+    await save({ coins: { put: [{ ...orig, archived: true }] } });
+    toast(`«${orig.name}» сховано — операції лишились`, { label: 'Скасувати', run: () => save({ coins: { put: [{ ...orig }] } }) });
+  } else {
+    await save({ coins: { del: [orig.id] } });
+    toast(`«${orig.name}» видалено`, { label: 'Скасувати', run: () => save({ coins: { put: [{ ...orig }] } }) });
+  }
+}
+
+// Тягнеш монету до краю ряду — ряд гортається на сусідню сторінку (раз на PAGE_WAIT мс)
+const PAGE_EDGE = 28;
+const PAGE_WAIT = 600;
 
 const LONG_PRESS = 500;
 const EDGE = 70;
@@ -180,7 +349,7 @@ function bindCoin(el, face, c) {
       long = true;
       vibrate();
       cleanup();
-      editCoin(c);
+      if (!editing()) go('edit');
     }, LONG_PRESS);
 
     const findTarget = () => {
@@ -195,6 +364,21 @@ function bindCoin(el, face, c) {
       if (!drag) return;
       const dy = at.y > innerHeight - EDGE ? 12 : at.y < EDGE + 60 ? -12 : 0;
       if (dy) { scrollBy(0, dy); findTarget(); }
+      // Край ряду зі сторінками — перегорнути, якщо палець тримають там
+      const track = [...document.querySelectorAll('.pager-track')].find((t) => {
+        const r = t.getBoundingClientRect();
+        return at.y >= r.top && at.y <= r.bottom;
+      });
+      const r = track?.getBoundingClientRect();
+      const dir = !r ? 0 : at.x < r.left + PAGE_EDGE ? -1 : at.x > r.right - PAGE_EDGE ? 1 : 0;
+      const now = performance.now();
+      if (!dir) drag.edgeAt = 0;
+      else if (!drag.edgeAt) drag.edgeAt = now;
+      else if (now - drag.edgeAt > PAGE_WAIT) {
+        track.scrollBy({ left: dir * track.clientWidth, behavior: 'smooth' });
+        drag.edgeAt = now;
+        setTimeout(findTarget, 350);
+      }
       drag.raf = requestAnimationFrame(scrollLoop);
     };
     const startDrag = () => {
@@ -205,8 +389,9 @@ function bindCoin(el, face, c) {
       document.body.append(ghost);
       document.body.classList.add('dragging');
       el.classList.add('drag-src');
+      const ok = editing() ? (dst) => canReorder(c, dst) : (dst) => canDrop(c, dst);
       for (const t of document.querySelectorAll('.coin[data-id]')) {
-        if (canDrop(c, coin(t.dataset.id))) t.classList.add('drop-ok');
+        if (ok(coin(t.dataset.id))) t.classList.add('drop-ok');
       }
       drag = { ghost, over: null, raf: 0 };
       vibrate();
@@ -219,7 +404,7 @@ function bindCoin(el, face, c) {
         if (Math.hypot(at.x - start.x, at.y - start.y) < 8) return;
         moved = true;
         clearTimeout(timer);
-        if (c.kind === 'expense') { cleanup(); return; }
+        if (c.kind === 'expense' && !editing()) { cleanup(); return; }
         startDrag();
       }
       if (!drag) return;
@@ -234,8 +419,13 @@ function bindCoin(el, face, c) {
       const wasDrag = Boolean(drag);
       const tap = !moved && !long && ev.type === 'pointerup';
       cleanup();
-      if (wasDrag && target && ev.type === 'pointerup') openAmount({ from: c.id, to: target.dataset.id });
-      else if (tap) openFeed(c.id);
+      if (wasDrag && target && ev.type === 'pointerup') {
+        if (editing()) reorder(c, target.dataset.id);
+        else openAmount({ from: c.id, to: target.dataset.id });
+      } else if (tap) {
+        if (editing()) editCoin(c);
+        else openFeed(c.id);
+      }
     };
     function cleanup() {
       clearTimeout(timer);
@@ -375,8 +565,7 @@ function openAmount({ from, to, op = null }) {
   };
   const remove = async () => {
     closeSheet();
-    await save({ ops: { del: [op.id] } });
-    toast('Операцію видалено', { label: 'Скасувати', run: () => save({ ops: { put: [{ ...op }] } }) });
+    await deleteOp(op);
   };
 
   // Дата з календаря: прихований input type=date, showPicker там, де є
@@ -447,7 +636,9 @@ function openAmount({ from, to, op = null }) {
   const screen = h('div', { class: 'amt' },
     h('div', { class: 'amt-head' },
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Скасувати', onClick: () => closeSheet() }, icon('close')),
-      h('div', { class: 'amt-route' }, h('span', {}, src.name), icon('next'), h('span', {}, dst.name)),
+      h('div', { class: 'amt-route' },
+        h('span', { class: 'amt-end' }, miniCoin(src), h('span', {}, src.name)), icon('next'),
+        h('span', { class: 'amt-end' }, miniCoin(dst), h('span', {}, dst.name))),
       op ? h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Видалити', onClick: remove }, icon('trash')) : null,
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Зберегти', onClick: () => store() }, icon('check'))),
     h('div', { class: 'amt-body' }, lineA, two ? lineB : null, res, note));
@@ -482,11 +673,73 @@ function opRow(op) {
   const sign = t === 'expense' ? '− ' : t === 'income' ? '+ ' : '';
   const note = [(op.tags ?? []).map((x) => `#${x}`).join(' '), op.comment].filter(Boolean);
   const second = op.amountTo != null && t === 'transfer' ? ` → ${M.money(op.amountTo, dst.currency)}` : '';
-  return h('button', { type: 'button', class: 'op-row', onClick: () => openAmount({ from: op.from, to: op.to, op }) },
+  const row = h('button', { type: 'button', class: 'op-row', onClick: () => openAmount({ from: op.from, to: op.to, op }) },
+    miniCoin(t === 'income' ? src : dst),
     h('span', { class: 'op-ends' }, h('span', { class: 'op-from' }, src.name), h('span', { class: 'op-to' }, dst.name)),
     h('span', { class: 'op-right' },
       h('span', { class: `op-sum ${t}` }, M.money(v, cur, { sign }) + second),
       note.map((x) => h('span', { class: 'op-note' }, x))));
+  return swipeRow(row, { onLeft: () => deleteOp(op), onRight: () => openAmount({ from: op.from, to: op.to, op }) });
+}
+
+async function deleteOp(op) {
+  await save({ ops: { del: [op.id] } });
+  toast('Операцію видалено', { label: 'Скасувати', run: () => save({ ops: { put: [{ ...op }] } }) });
+}
+
+/**
+ * Свайп рядка: вліво — onLeft (видалити), вправо — onRight (змінити). Спрацьовує далі третини ширини:
+ * короткий рух — це ще прокрутка. Після свайпу клік, що приходить слідом, не відкриває операцію.
+ */
+function swipeRow(row, { onLeft, onRight }) {
+  const wrap = h('div', { class: 'swipe-row' },
+    h('div', { class: 'swipe-bg edit', 'aria-hidden': 'true' }, icon('pen'), 'Змінити'),
+    h('div', { class: 'swipe-bg del', 'aria-hidden': 'true' }, 'Видалити', icon('trash')),
+    row);
+  let start = null;
+  let dx = 0;
+  let axis = null;
+  let armed = false;
+  let swallow = false;
+  const reset = () => {
+    row.style.transition = 'transform .18s ease';
+    row.style.transform = '';
+    wrap.classList.remove('armed', 'to-left', 'to-right');
+    start = null; axis = null; dx = 0; armed = false;
+  };
+  row.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    start = { x: e.clientX, y: e.clientY, id: e.pointerId };
+    row.style.transition = 'none';
+  });
+  row.addEventListener('pointermove', (e) => {
+    if (!start || e.pointerId !== start.id) return;
+    const mx = e.clientX - start.x;
+    const my = e.clientY - start.y;
+    if (!axis) {
+      if (Math.abs(mx) < 8 && Math.abs(my) < 8) return;
+      axis = Math.abs(mx) > Math.abs(my) ? 'x' : 'y';
+      if (axis === 'x') row.setPointerCapture(start.id);
+    }
+    if (axis !== 'x') return;
+    dx = mx;
+    row.style.transform = `translateX(${dx}px)`;
+    wrap.classList.toggle('to-left', dx < 0);
+    wrap.classList.toggle('to-right', dx > 0);
+    const now = Math.abs(dx) > row.clientWidth / 3;
+    if (now !== armed) { armed = now; wrap.classList.toggle('armed', armed); if (armed) vibrate(); }
+  });
+  const finish = (e) => {
+    if (!start || e.pointerId !== start.id) return;
+    const act = armed && e.type === 'pointerup' ? (dx < 0 ? onLeft : onRight) : null;
+    swallow = axis === 'x';
+    reset();
+    if (act) { vibrate(40); act(); }
+  };
+  row.addEventListener('pointerup', finish);
+  row.addEventListener('pointercancel', finish);
+  row.addEventListener('click', (e) => { if (swallow) { swallow = false; e.stopImmediatePropagation(); } }, true);
+  return wrap;
 }
 
 const byNewest = (a, b) => b.date.localeCompare(a.date) || (b.created ?? b.updated ?? 0) - (a.created ?? a.updated ?? 0);
@@ -535,42 +788,58 @@ function reportParts(kind, ym) {
   return top;
 }
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+function svgEl(tag, attrs) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
+  return el;
+}
+
+/**
+ * Кільце часток із підписами відсотків на виносках, як у звіті «Загальний».
+ * Виноска: від кільця назовні, далі горизонтальна полиця; підписи з одного боку не налазять — зсуваємо вниз.
+ */
 function donut(parts, total, center) {
   const R = 100;
   const C = 2 * Math.PI * R;
-  const GAP = parts.length > 1 ? 2 : 0;
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('viewBox', '-140 -140 280 280');
-  svg.setAttribute('role', 'img');
+  const GAP = parts.length > 1 ? 2.5 : 0;
+  const svg = svgEl('svg', { viewBox: '-170 -135 340 270', role: 'img' });
   svg.setAttribute('aria-label', parts.map((p) => `${p.c.name} ${Math.round((p.v / total) * 100)}%`).join(', '));
+  const labels = [];
   let acc = 0;
   for (const p of parts) {
     const share = p.v / total;
     const len = Math.max(share * C - GAP, 0.5);
-    const seg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    seg.setAttribute('r', R);
-    seg.setAttribute('class', `donut-seg${reportPick && reportPick !== p.c.id ? ' dim' : ''}`);
-    seg.setAttribute('stroke', p.color);
-    seg.setAttribute('stroke-dasharray', `${len} ${C - len}`);
-    seg.setAttribute('stroke-dashoffset', String(-acc * C));
-    seg.setAttribute('transform', 'rotate(-90)');
-    const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+    const seg = svgEl('circle', {
+      r: R, class: `donut-seg${reportPick && reportPick !== p.c.id ? ' dim' : ''}`, stroke: p.color,
+      'stroke-dasharray': `${len} ${C - len}`, 'stroke-dashoffset': -acc * C, transform: 'rotate(-90)',
+    });
+    const title = svgEl('title', {});
     title.textContent = `${p.c.name}: ${M.money(p.v)}`;
     seg.append(title);
     seg.addEventListener('click', () => { reportPick = reportPick === p.c.id ? null : p.c.id; render(); });
     svg.append(seg);
-    // Підпис відсотка — лише для помітних часток, щоб не налазили
-    if (share >= 0.05) {
+    if (share >= 0.03) {
       const mid = (acc + share / 2) * 2 * Math.PI - Math.PI / 2;
-      const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-      t.setAttribute('x', String(Math.cos(mid) * (R + 22)));
-      t.setAttribute('y', String(Math.sin(mid) * (R + 22) + 4));
-      t.setAttribute('text-anchor', 'middle');
-      t.setAttribute('class', 'donut-label');
-      t.textContent = `${Math.round(share * 100)}%`;
-      svg.append(t);
+      labels.push({ mid, color: p.color, text: `${Math.round(share * 100)}%`, right: Math.cos(mid) >= 0 });
     }
     acc += share;
+  }
+  // Виноски: точка на кільці → злам на R+18 → полиця до краю; по боках — не ближче 15 одиниць по висоті
+  for (const side of [true, false]) {
+    const list = labels.filter((l) => l.right === side)
+      .map((l) => ({ ...l, x1: Math.cos(l.mid) * (R + 8), y1: Math.sin(l.mid) * (R + 8), y: Math.sin(l.mid) * (R + 22) }))
+      .sort((a, b) => a.y - b.y);
+    for (let i = 1; i < list.length; i++) list[i].y = Math.max(list[i].y, list[i - 1].y + 15);
+    for (const l of list) {
+      const xk = Math.cos(l.mid) * (R + 22);
+      const xe = side ? Math.max(xk + 12, R + 34) : Math.min(xk - 12, -R - 34);
+      svg.append(svgEl('polyline', { points: `${l.x1},${l.y1} ${xk},${l.y} ${xe},${l.y}`, class: 'donut-lead', stroke: l.color }));
+      const t = svgEl('text', { x: xe + (side ? 3 : -3), y: l.y + 4, 'text-anchor': side ? 'start' : 'end', class: 'donut-label' });
+      t.textContent = l.text;
+      svg.append(t);
+    }
   }
   return h('div', { class: 'donut-box' }, svg, h('div', { class: 'donut-center' }, center));
 }
@@ -637,14 +906,21 @@ function viewDays() {
 
 // ---------- редагування монети ----------
 
+const NEW_ICON = { account: 'wallet', income: 'banknote', expense: 'shopping-cart', goal: 'piggy-bank' };
+const GRID_KINDS = [['expense', 'Витрата'], ['goal', 'Ціль']];
+
 function editCoin(orig, kind = orig?.kind) {
   const d = orig ? structuredClone(orig)
-    : { id: uid(), kind, name: '', icon: kind === 'account' ? 'wallet' : kind === 'income' ? 'banknote' : 'shopping-cart', currency: 'UAH', budget: 0, start: 0, order: Date.now(), archived: false };
+    : { id: uid(), kind, name: '', icon: NEW_ICON[kind], currency: 'UAH', budget: 0, start: 0, order: Date.now(), archived: false };
+  // Рахунок і ціль тримають гроші — у них задають залишок
+  const holds = kind === 'account' || kind === 'goal';
   const used = orig && state.ops.some((op) => op.from === orig.id || op.to === orig.id);
   const name = h('input', { type: 'text', maxlength: 30, value: d.name, placeholder: 'Назва', autocomplete: 'off', 'aria-label': 'Назва' });
   const amountField = (value, label) => h('input', { type: 'number', inputmode: 'decimal', step: '0.01', min: '0', value: value || '', placeholder: '0', 'aria-label': label });
-  const budget = amountField(d.budget, kind === 'income' ? 'План на місяць' : 'Бюджет на місяць');
-  const start = amountField(orig ? balance(orig) : 0, 'Залишок зараз');
+  const budgetLabel = { income: 'План на місяць (не обов’язково)', expense: 'Бюджет на місяць', goal: 'Скільки треба зібрати' }[kind];
+  const budget = amountField(d.budget, budgetLabel);
+  const startLabel = kind === 'goal' ? 'Уже відкладено' : 'Залишок зараз';
+  const start = amountField(orig ? balance(orig) : 0, startLabel);
   const icons = M.COIN_ICONS.filter(hasIcon);
   const grid = h('div', { class: 'icon-grid', role: 'group', 'aria-label': 'Іконка' });
   const paintIcons = () => {
@@ -658,7 +934,7 @@ function editCoin(orig, kind = orig?.kind) {
     const rec = { ...d, name: name.value.trim() };
     if (!rec.name) { toast('Дай назву'); return; }
     rec.budget = Math.max(0, Number(budget.value) || 0);
-    if (kind === 'account') {
+    if (holds) {
       // Залишок задають «скільки зараз»: різницю переносимо в стартовий, операції не чіпаємо
       const now = Number(start.value) || 0;
       rec.start = M.round2((d.start || 0) + now - (orig ? balance(orig) : 0));
@@ -668,19 +944,17 @@ function editCoin(orig, kind = orig?.kind) {
   };
   const remove = async () => {
     closeSheet();
-    if (used) {
-      await save({ coins: { put: [{ ...orig, archived: true }] } });
-      toast(`«${orig.name}» сховано — операції лишились`, { label: 'Скасувати', run: () => save({ coins: { put: [{ ...orig }] } }) });
-    } else {
-      await save({ coins: { del: [orig.id] } });
-      toast(`«${orig.name}» видалено`, { label: 'Скасувати', run: () => save({ coins: { put: [{ ...orig }] } }) });
-    }
+    await removeCoin(orig);
   };
   sheet(orig ? orig.name : `Нова монета: ${M.KINDS[kind].toLowerCase()}`, h('div', { class: 'form' },
+    // Нова монета в сітці витрат: витрата чи ціль — інший тип перемальовує форму
+    !orig && (kind === 'expense' || kind === 'goal')
+      ? [h('p', { class: 'flabel' }, 'Тип'), chips(GRID_KINDS, kind, (v) => { if (v !== kind) editCoin(null, v); })] : null,
+    kind === 'goal' ? h('p', { class: 'muted small' }, 'Відкладене: гроші з рахунку переносиш сюди перетягуванням. У «Баланс» і у витрати не входять.') : null,
     h('label', { class: 'flabel' }, 'Назва'), name,
     kind !== 'expense' || !used ? [h('p', { class: 'flabel' }, 'Валюта'), chips(M.CURRENCIES, d.currency, (v) => { d.currency = v; })] : null,
-    kind === 'account' ? [h('label', { class: 'flabel' }, `Залишок зараз`), start] : null,
-    kind !== 'account' ? [h('label', { class: 'flabel' }, kind === 'income' ? 'План на місяць (не обов’язково)' : 'Бюджет на місяць'), budget] : null,
+    kind !== 'account' ? [h('label', { class: 'flabel' }, budgetLabel), budget] : null,
+    holds ? [h('label', { class: 'flabel' }, startLabel), start] : null,
     h('p', { class: 'flabel' }, 'Іконка'), grid,
     h('div', { class: 'btn-grid' },
       h('button', { type: 'button', class: 'btn primary', onClick: store }, icon('check'), 'Зберегти'),
@@ -738,17 +1012,166 @@ function viewSettings() {
           try { await fetchRates(true); toast('Курс НБУ оновлено'); render(); } catch (err) { toast(err instanceof TypeError ? 'Немає зв’язку з НБУ' : err.message); }
         },
       }, icon('refresh'), 'Курс НБУ на сьогодні')),
+    syncCard(),
+    demoCard(),
     h('section', { class: 'card set-card' },
       h('h2', {}, 'Резервна копія'),
-      h('p', { class: 'muted small' }, 'Усе зберігається лише на цьому телефоні. Копія — файл JSON: зберігай його, щоб не втратити дані.'),
+      h('p', { class: 'muted small' }, Sync.syncOn()
+        ? 'Файл JSON з усіма даними — про всяк випадок, окремо від Google Диска.'
+        : 'Без Google Диска все зберігається лише на цьому телефоні. Копія — файл JSON: зберігай його, щоб не втратити дані.'),
       h('div', { class: 'btn-grid' },
         h('button', { type: 'button', class: 'btn', onClick: exportBackup }, icon('archive'), 'Зберегти копію'),
         h('button', { type: 'button', class: 'btn', onClick: () => file.click() }, icon('undo'), 'Відновити')),
       file),
-    h('section', { class: 'card set-card' },
-      h('h2', {}, 'Марнотрат'),
-      h('p', { class: 'muted small' }, `Версія ${self.APP_VERSION ?? '?'} · збірка ${self.APP_BUILD ?? '?'}`),
-      upd.worker ? h('button', { type: 'button', class: 'btn primary', onClick: () => upd.worker.postMessage('skipWaiting') }, icon('refresh'), 'Оновити') : null));
+    aboutPanel(),
+    aboutCard());
+}
+
+/** «Про застосунок»: автор, що воно таке, де дані, з чого почати — як у hobby-planner і shooting-log. */
+function aboutPanel() {
+  const link = (href, text) => h('a', { href, target: '_blank', rel: 'noopener' }, text);
+  const more = (title, node) => h('details', { class: 'about-more' }, h('summary', {}, title), node);
+  return h('section', { class: 'card set-card' },
+    h('div', { class: 'about-head' },
+      h('img', { class: 'about-avatar', src: './icons/author.jpg', alt: '', width: 64, height: 64, loading: 'lazy' }),
+      h('div', {},
+        h('h2', {}, 'Про застосунок'),
+        h('p', { class: 'muted small' }, 'Марнотрат — облік витрат монетами: перетягнув гроші з рахунку на витрату — записано. Працює без інтернету.'),
+        h('p', { class: 'small about-author' }, 'Автор — ', link('https://github.com/VitaliyLobko', 'Віталій Лобко')))),
+    more('Де мої дані', h('div', { class: 'muted small' },
+      h('p', {}, 'Монети й операції лежать у браузері на цьому телефоні. Сервера в застосунку немає, автор не отримує ні даних, ні статистики.'),
+      h('p', {}, 'Google Диск — за бажанням: дані лягають у файл на твоєму Диску й однакові на всіх твоїх телефонах. Застосунок бачить лише свої файли.'),
+      h('p', {}, 'Резервна копія — «Зберегти копію»: файл JSON, ним же переносиш дані вручну.'))),
+    more('З чого почати', h('ol', { class: 'about-steps' },
+      h('li', {}, 'Встанови застосунок: Android — Chrome → ⋮ → «Встановити застосунок»; iPhone — Safari → «Поділитися» → «На екран „Додому“».'),
+      h('li', {}, 'Довге натискання на монету — режим «Редагування»: назва, іконка, бюджет, переставити, прибрати. «+» у ряду — нова монета.'),
+      h('li', {}, 'Дохід → рахунок, рахунок → витрата чи ціль, рахунок → рахунок: тягни монету пальцем на іншу й введи суму.'),
+      h('li', {}, 'Тап по монеті — її операції. У стрічці свайп вліво — видалити, вправо — змінити.'),
+      h('li', {}, 'Хочеш спершу подивитись — «Демо-дані» вище, потім «Прибрати демо».'))),
+    h('p', { class: 'muted small' },
+      link('https://github.com/VitaliyLobko/marnotrat/issues/new', 'Повідомити про помилку'), ' · ',
+      link('https://github.com/VitaliyLobko/marnotrat', 'Вихідний код')));
+}
+
+function aboutCard() {
+  const status = h('p', { class: 'muted small', 'aria-live': 'polite' },
+    upd.worker ? 'Нова версія завантажена — оновлення займе секунду, дані залишаться'
+      : (upd.checked ? `У тебе остання версія · перевірено о ${upd.checked}` : ''));
+  return h('section', { class: 'card set-card' },
+    h('h2', {}, 'Марнотрат'),
+    h('p', { class: 'muted small' }, `Версія ${self.APP_VERSION ?? '?'} · збірка ${self.APP_BUILD ?? '?'}`),
+    status,
+    h('div', { class: 'btn-grid' },
+      upd.worker
+        ? h('button', { type: 'button', class: 'btn primary', onClick: () => upd.worker.postMessage('skipWaiting') }, icon('refresh'), 'Оновити')
+        : h('button', { type: 'button', class: 'btn', onClick: () => checkUpdate(status) }, icon('refresh'), 'Перевірити оновлення'),
+      h('button', { type: 'button', class: 'btn', onClick: () => changesSheet(CHANGES.slice(0, 6), 'Що нового') }, icon('star'), 'Що нового')));
+}
+
+/** Новий worker після reg.update(): дочекатись, поки встановиться (або відпаде). */
+function whenInstalled(worker) {
+  return new Promise((resolve) => {
+    const check = () => { if (worker.state !== 'installing') { worker.removeEventListener('statechange', check); resolve(worker); } };
+    worker.addEventListener('statechange', check);
+    check();
+  });
+}
+
+async function checkUpdate(status) {
+  if (!upd.reg) { status.textContent = 'Перевірка недоступна: офлайн-режим не встановлено (локальний запуск чи приватне вікно)'; return; }
+  status.textContent = 'Перевіряю…';
+  try {
+    await upd.reg.update();
+  } catch {
+    status.textContent = 'Немає зв’язку — спробуй пізніше';
+    return;
+  }
+  const fresh = upd.reg.installing ? await whenInstalled(upd.reg.installing) : upd.reg.waiting;
+  // Без controller (перший запуск) новий worker вмикається сам — оновлювати нічого
+  if (fresh && navigator.serviceWorker.controller && fresh.state === 'installed') {
+    upd.worker = fresh;
+    $('update').hidden = false;
+    $('update-btn').onclick = () => fresh.postMessage('skipWaiting');
+    render();
+    return;
+  }
+  upd.checked = new Date().toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' });
+  status.textContent = `У тебе остання версія · перевірено о ${upd.checked}`;
+}
+
+// ---------- «Що нового» ----------
+
+function changesSheet(list, title) {
+  sheet(title, h('div', { class: 'stack changes-list' },
+    ...list.map((c) => h('div', { class: 'changes' },
+      h('h3', {}, `Версія ${c.v}`),
+      h('ul', {}, c.items.map((t) => h('li', {}, t))))),
+    h('button', { type: 'button', class: 'btn primary', onClick: () => closeSheet() }, icon('check'), 'Зрозуміло')));
+}
+
+/** Після оновлення — один раз, що з'явилось з тієї версії, що була. Перший запуск — лише запам'ятати версію. */
+function showWhatsNew() {
+  const current = self.APP_VERSION;
+  if (!current) return;
+  const seen = recall('seen-version');
+  remember('seen-version', current);
+  // 0.1.0 «Що нового» ще не мала: хто вже мав операції — показуємо поточну версію
+  if (seen === current || (!seen && !state.ops.length)) return;
+  const list = seen ? changesSince(seen, current) : CHANGES.filter((c) => c.v === current);
+  if (list.length) changesSheet(list.slice(0, 4), `Що нового в ${current}`);
+}
+
+function syncCard() {
+  const on = Sync.syncOn();
+  const last = Sync.lastSync();
+  const when = last ? new Date(last).toLocaleString('uk-UA', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }) : '';
+  const connect = async () => {
+    try {
+      await Sync.connect();
+      await runSync({ loud: true });
+    } catch (err) { toast(err.message); }
+    render();
+  };
+  const off = () => sheet('Відключити Google Диск?', h('div', { class: 'form' },
+    h('p', {}, 'Дані лишаються і тут, і на Диску — просто перестануть синхронізуватись.'),
+    h('div', { class: 'btn-grid' },
+      h('button', { type: 'button', class: 'btn danger', onClick: () => { closeSheet(); Sync.disconnect(); render(); } }, 'Відключити'),
+      h('button', { type: 'button', class: 'btn', onClick: closeSheet }, 'Залишити'))));
+  return h('section', { class: 'card set-card' },
+    h('h2', {}, 'Google Диск'),
+    h('p', { class: 'muted small' }, on
+      ? (sync.error ? `Помилка: ${sync.error}` : last ? `Синхронізовано ${when}` : 'Ще не синхронізовано')
+      : 'Дані спільні для всіх твоїх телефонів: файл marnotrat-sync.json на твоєму Диску. Застосунок бачить лише свої файли.'),
+    on
+      ? h('div', { class: 'btn-grid' },
+        h('button', { type: 'button', class: 'btn primary', onClick: () => runSync({ loud: true }) }, icon('refresh'), 'Синхронізувати'),
+        h('button', { type: 'button', class: 'btn', onClick: off }, icon('close'), 'Відключити'))
+      : h('button', { type: 'button', class: 'btn primary', onClick: connect }, icon('refresh'), 'Підключити Google Диск'));
+}
+
+function demoCard() {
+  const add = async () => {
+    const changes = demoChanges(state.coins, uid);
+    if (!changes) { toast('Потрібні хоча б один дохід, рахунок у гривнях і витрата'); return; }
+    await save(changes, { redraw: false });
+    toast(`Додано ${changes.ops.put.length} демо-операцій`);
+    go('main');
+  };
+  const remove = async () => {
+    const changes = demoRemoval(state);
+    if (!changes) return;
+    await save(changes);
+    toast('Демо прибрано');
+  };
+  const has = hasDemo(state);
+  return h('section', { class: 'card set-card' },
+    h('h2', {}, 'Демо-дані'),
+    h('p', { class: 'muted small' }, has
+      ? 'Демо зараз у застосунку. «Прибрати» видалить лише демо-операції й ціль «Відпустка» — твоє лишиться.'
+      : 'Три місяці вигаданих операцій, ціль і бюджети — щоб подивитись, як усе виглядає з даними.'),
+    has
+      ? h('button', { type: 'button', class: 'btn danger', onClick: remove }, icon('close'), 'Прибрати демо')
+      : h('button', { type: 'button', class: 'btn', onClick: add }, icon('plus'), 'Додати демо-дані'));
 }
 
 const backupData = () => ({ app: 'marnotrat', version: self.APP_VERSION, exported: new Date().toISOString(), ...state });
@@ -810,11 +1233,17 @@ function openFeed(id) {
 }
 
 function go(hash) {
+  if (hash === 'edit') {
+    history.pushState({ edit: true }, '', '#edit');
+    route();
+    return;
+  }
   location.hash = `#${hash}`;
 }
 
 const VIEWS = {
   main: { render: viewMain },
+  edit: { render: viewMain },
   feed: { title: () => (feedCoin ? coinOr(feedCoin).name : 'Стрічка'), render: viewFeed },
   report: { title: 'Загальний', render: viewReport },
   days: { title: 'Звіт по днях', render: viewDays },
@@ -835,6 +1264,13 @@ function topbar() {
       }, icon('chevron')));
     return;
   }
+  if (view === 'edit') {
+    bar.className = 'topbar';
+    bar.replaceChildren(
+      h('h1', { class: 'edit-title' }, 'Редагування'),
+      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Готово', onClick: () => (history.state?.edit ? history.back() : go('main')) }, icon('check')));
+    return;
+  }
   const { title } = VIEWS[view];
   bar.className = 'topbar brand';
   bar.replaceChildren(
@@ -842,9 +1278,22 @@ function topbar() {
     h('h1', {}, typeof title === 'function' ? title() : title));
 }
 
+// Підпис монети, що не влазить у рядок, — дрібніше рівно настільки, щоб влізти, але не менше 9px
+const NAME_MIN_PX = 9;
+
+function fitNames() {
+  for (const el of document.querySelectorAll('.coin-name')) {
+    el.style.fontSize = '';
+    if (el.scrollWidth <= el.clientWidth) continue;
+    const px = parseFloat(getComputedStyle(el).fontSize);
+    el.style.fontSize = `${Math.max(NAME_MIN_PX, Math.floor(px * (el.clientWidth / el.scrollWidth) * 0.96 * 10) / 10)}px`;
+  }
+}
+
 function render() {
   topbar();
   $('view').replaceChildren(VIEWS[view].render());
+  if (onMain()) { fitNames(); animateSums(); }
 }
 
 function route() {
@@ -908,6 +1357,12 @@ async function init() {
     return;
   }
   window.addEventListener('hashchange', route);
+  // Синхронізація: при відкритті й поверненні в застосунок; ключ Google оновлюємо з першого натискання
+  if (Sync.syncOn()) { Sync.preload(); runSync(); }
+  showWhatsNew();
+  document.addEventListener('pointerup', () => { if (Sync.syncOn() && !Sync.tokenValid()) runSync({ gesture: true }); }, true);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') runSync(); });
+  addEventListener('resize', () => { if (onMain()) fitNames(); });
   route();
   // Курс НБУ — раз на день, тихо: без зв'язку лишається попередній
   fetchRates().then((changed) => { if (changed && view !== 'settings') render(); }).catch(() => {});

@@ -11,6 +11,9 @@ const ASSETS = [
   './js/app.js',
   './js/db.js',
   './js/model.js',
+  './js/sync.js',
+  './js/demo.js',
+  './js/changes.js',
   './js/ui.js',
   './js/icons.js',
   './js/icons-lucide.js',
@@ -18,6 +21,7 @@ const ASSETS = [
   './icons/icon-512.png',
   './icons/icon-maskable-512.png',
   './icons/apple-touch-icon.png',
+  './icons/author.jpg',
 ];
 
 // Файли — повз HTTP-кеш браузера: GitHub Pages віддає max-age=600,

@@ -17,6 +17,8 @@
   --acc: #ffcc00;
   --acc-ink: #e9a400;
   --coin-empty: #c3c5c9;
+  --goal: #22c3d6;
+  --goal-ink: #0ea5b8;
   --coin-ico: #ffffff;
   /* статус витрати: у бюджеті / близько / перевитрата */
   --ok: #10cf8e;
@@ -54,6 +56,8 @@
   --acc: #d9ad00;
   --acc-ink: #f2c230;
   --coin-empty: #3a3f47;
+  --goal: #179fb0;
+  --goal-ink: #4fd3e3;
   --coin-ico: #eef1f4;
   --ok: #10a874;
   --ok-ink: #3ad39c;
@@ -124,24 +128,29 @@ a { color: var(--brand); }
 
 /* ---------- головна: ряди монет ---------- */
 
-.coin-row, .coin-grid {
-  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px 6px;
+.coin-grid {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px 6px; align-content: start;
   padding: 8px 6px 12px;
 }
 .coin-row { background: var(--surface); border-bottom: 1px solid var(--line); }
-/* ряди доходів і рахунків — по 4 на екрані, решта й «+» — гортанням убік */
-.coin-row { grid-auto-flow: column; grid-template-columns: none; grid-auto-columns: calc((100% - 18px) / 4); overflow-x: auto; scrollbar-width: none; }
-.coin-row::-webkit-scrollbar { display: none; }
-.coin-row.incomes { border-bottom: 1px solid var(--line); }
+/* сторінки ряду: гортання вбік із прилипанням до сторінки, крапки внизу */
+.pager-track {
+  display: flex; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none;
+  overscroll-behavior-x: contain;
+}
+.pager-track::-webkit-scrollbar { display: none; }
+.pager-page { flex: 0 0 100%; scroll-snap-align: start; scroll-snap-stop: always; }
+.pager-dots { display: flex; justify-content: center; gap: 6px; padding: 0 0 8px; margin-top: -4px; }
+.pager-dots span { width: 6px; height: 6px; border-radius: 50%; background: var(--line); }
+.pager-dots span.on { background: var(--muted); }
 .coin {
   display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0;
   padding: 4px 0; text-align: center; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
 }
-/* назва — до двох рядків, притиснута до монети: довгі («Хобі й відпочинок») не обрізаються */
+/* назва — в один рядок; задовгу («Хобі й відпочинок») app.js зменшує, «…» — лише коли й 9px замало */
 .coin-name {
-  display: flex; align-items: flex-end; justify-content: center;
-  max-width: 100%; height: 2.4em; overflow: hidden;
-  font-size: 13px; line-height: 1.2; color: var(--text-2); overflow-wrap: anywhere;
+  max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  font-size: clamp(11px, 3.2vw, 13px); color: var(--text-2);
 }
 .coin-face {
   position: relative; overflow: hidden;
@@ -152,14 +161,30 @@ a { color: var(--brand); }
   touch-action: none;
   transition: transform .15s ease, box-shadow .15s ease, opacity .15s ease;
 }
-.k-expense .coin-face { touch-action: pan-y; }
+/* витрату гортають в обидва боки; рахунок, дохід і ціль — лише вбік: рух униз чи навскіс уже перетягування */
+.k-expense .coin-face { touch-action: pan-x pan-y; }
+.k-income .coin-face, .k-account .coin-face, .k-goal .coin-face { touch-action: pan-x; }
 .coin-face .coin-ico { position: relative; z-index: 1; }
-.coin-face .coin-ico svg { width: 30px; height: 30px; stroke-width: 1.4; }
+/* іконка — близько половини монети, тонкою лінією */
+.coin-face .coin-ico { width: 50%; }
+.coin-face .coin-ico svg { width: 100%; height: auto; stroke-width: 1.2; }
 .coin-fill { position: absolute; left: 0; right: 0; bottom: 0; height: calc(var(--fill, 0) * 100%); background: var(--ok); }
 .k-income .coin-face { background: var(--inc); }
 .k-account .coin-face { background: var(--acc); }
+/* ціль: сірий обідок заповнюється бірюзовим по колу, всередині — бірюзова монета */
+.k-goal .coin-face {
+  background: conic-gradient(var(--goal) calc(var(--fill, 0) * 360deg), var(--coin-empty) 0);
+}
+.k-goal .coin-face::before {
+  content: ''; position: absolute; inset: 9%; border-radius: 50%; background: var(--goal);
+  box-shadow: 0 0 0 3px var(--bg);
+}
+.k-goal .coin-sum { color: var(--goal-ink); }
+.k-goal.st-done .coin-face::before { background: var(--ok); }
 .st-warn .coin-fill { background: var(--warn); }
 .st-over .coin-fill { background: var(--over); }
+/* без бюджету: сіра монета з зеленим обідком */
+.st-free .coin-face { box-shadow: inset 0 0 0 4px var(--ok); }
 .coin-sum { font-size: 14px; font-weight: 500; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .k-income .coin-sum { color: var(--inc-ink); }
 .k-account .coin-sum { color: var(--acc-ink); }
@@ -168,13 +193,20 @@ a { color: var(--brand); }
 .k-expense.st-over .coin-sum { color: var(--over-ink); }
 .coin-sub { margin-top: -4px; font-size: 12px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .coin-add { border: 0; background: none; font: inherit; }
-.coin-add .coin-face { background: none; border: 2px solid var(--line); color: var(--muted); touch-action: auto; }
-.coin-add .coin-face .ico svg { width: 30px; height: 30px; stroke-width: 1.4; }
+.coin-add .coin-face { background: none; border: 2px dashed var(--line); color: var(--muted); touch-action: auto; }
+.coin-add .coin-face .ico { width: 40%; }
+.coin-add .coin-face .ico svg { width: 100%; height: auto; stroke-width: 1.4; }
 
 /* перетягування */
 .dragging .coin:not(.drop-ok):not(.drag-src) { opacity: .35; }
 .coin.drop-ok .coin-face { box-shadow: 0 0 0 3px var(--surface), 0 0 0 5px var(--brand); }
-.coin.drop-over .coin-face { transform: scale(1.12); }
+.coin.drop-over .coin-face { transform: scale(1.12); animation: drop-pulse .9s ease-in-out infinite; }
+@keyframes drop-pulse { 50% { transform: scale(1.04); } }
+/* відгук пальцю й «підскок» монети, у якої змінилась сума */
+.coin:not(.coin-ghost) .coin-face:active { transform: scale(.93); }
+.coin.bump .coin-face { animation: bump .45s ease-out; }
+@keyframes bump { 40% { transform: scale(1.1); } }
+@media (prefers-reduced-motion: reduce) { .coin .coin-face, .coin.drop-over .coin-face, .coin.bump .coin-face { animation: none; transition: none; } }
 .coin.drag-src .coin-face { opacity: .4; }
 .coin-ghost {
   position: fixed; z-index: 60; pointer-events: none; margin: 0;
@@ -194,7 +226,16 @@ a { color: var(--brand); }
   padding: 14px 16px; border: 0; border-bottom: 1px solid var(--line); background: none; text-align: left;
 }
 .op-row:last-of-type { border-bottom: 0; }
-.op-ends { display: flex; flex-direction: column; min-width: 0; }
+/* свайп рядка: вліво — видалити (червона смуга справа), вправо — змінити (зелена зліва) */
+.swipe-row { position: relative; overflow: hidden; border-bottom: 1px solid var(--line); }
+.swipe-row .op-row { position: relative; border-bottom: 0; background: var(--surface); touch-action: pan-y; }
+.swipe-bg { position: absolute; inset: 0; display: none; align-items: center; gap: 8px; padding: 0 20px; color: #fff; font-weight: 600; }
+.swipe-bg.del { justify-content: flex-end; background: color-mix(in srgb, var(--over) 55%, var(--surface)); }
+.swipe-bg.edit { justify-content: flex-start; background: color-mix(in srgb, var(--brand) 55%, var(--surface)); }
+.swipe-row.to-left .swipe-bg.del, .swipe-row.to-right .swipe-bg.edit { display: flex; }
+.swipe-row.armed .swipe-bg.del { background: var(--over); }
+.swipe-row.armed .swipe-bg.edit { background: var(--brand); }
+.op-ends { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .op-from { color: var(--muted); font-size: 14px; }
 .op-to { font-size: 17px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
 .op-right { display: flex; flex-direction: column; align-items: flex-end; text-align: right; min-width: 0; }
@@ -228,9 +269,10 @@ a { color: var(--brand); }
 .period .icon-btn { color: var(--muted); }
 .donut-box { position: relative; width: min(300px, 82vw); margin: 4px auto 8px; touch-action: pan-y; }
 .donut-box svg { display: block; width: 100%; height: auto; overflow: visible; }
-.donut-seg { fill: none; stroke-width: 12; cursor: pointer; }
+.donut-seg { fill: none; stroke-width: 18; cursor: pointer; }
+.donut-lead { fill: none; stroke-width: 1.2; }
 .donut-seg.dim { opacity: .3; }
-.donut-label { font-size: 11px; fill: var(--muted); }
+.donut-label { font-size: 13px; fill: var(--text-2); font-variant-numeric: tabular-nums; }
 .donut-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; text-align: center; }
 .donut-center span { color: var(--muted); font-size: 15px; max-width: 60%; }
 .donut-center b { font-size: 26px; font-weight: 400; font-variant-numeric: tabular-nums; }
@@ -303,7 +345,9 @@ a { color: var(--brand); }
 
 .amt-head { display: flex; align-items: center; gap: 4px; min-height: 60px; padding: env(safe-area-inset-top) 6px 0; border-bottom: 1px solid var(--line); box-shadow: 0 1px 4px rgb(0 0 0 / .08); }
 .amt-route { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 6px; color: var(--muted); font-size: 18px; }
-.amt-route span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; }
+.amt-end { display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; }
+.amt-end > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.amt-head .mini-coin { width: 30px; }
 .amt-body { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 6px; padding: 12px 18px; min-height: 0; }
 .amt-line { display: flex; align-items: baseline; justify-content: flex-end; gap: 12px; width: 100%; padding: 4px 0; border: 0; background: none; text-align: right; }
 .amt-val { font-size: clamp(40px, 15vw, 72px); font-weight: 200; line-height: 1.05; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
@@ -351,3 +395,60 @@ a { color: var(--brand); }
 .error { padding: 24px 16px; color: var(--over-ink); }
 /* на екрані суми тост — над кнопками дат */
 .layer-open .toast { bottom: calc(76px + env(safe-area-inset-bottom)); }
+
+/* маленька монета: рядок стрічки, шапка екрана суми */
+.mini-coin {
+  flex: none; display: grid; place-items: center; width: 36px; aspect-ratio: 1; border-radius: 50%;
+  background: var(--coin-empty); color: var(--coin-ico);
+}
+.mini-coin .ico { width: 56%; }
+.mini-coin .ico svg { width: 100%; height: auto; stroke-width: 1.5; }
+.mini-coin.k-income { background: var(--inc); }
+.mini-coin.k-account { background: var(--acc); }
+.mini-coin.k-goal { background: var(--goal); }
+.mini-coin.st-ok, .mini-coin.st-free { background: var(--ok); }
+.mini-coin.st-warn { background: var(--warn); }
+.mini-coin.st-over { background: var(--over); }
+.op-row { align-items: center; }
+.op-row .op-right { align-self: flex-start; }
+
+/* режим «Редагування»: ✕ зліва вгорі, ✎ на монеті справа внизу; витрати теж тягнуться */
+.edit-title { flex: 1; margin: 0; padding-left: 12px; font-size: 22px; font-weight: 400; text-align: center; color: var(--text-2); }
+.coin { position: relative; }
+.coin-x, .coin-pen {
+  position: absolute; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%;
+  background: var(--coin-empty); color: var(--coin-ico); z-index: 2;
+}
+.coin-x { top: calc(2.4em - 8px); left: 6%; width: 26px; height: 26px; box-shadow: 0 0 0 2px var(--bg); }
+.coin-x .ico svg, .coin-pen .ico svg { width: 15px; height: 15px; stroke-width: 2.2; }
+.coin-pen { top: calc(2.4em + min(74px, 19vw) - 30px); right: 10%; width: 26px; height: 26px; box-shadow: 0 0 0 2px var(--bg); }
+.main.editing .coin-face { touch-action: pan-x; animation: wiggle .5s ease-in-out infinite alternate; }
+.main.editing .coin:nth-child(2n) .coin-face { animation-delay: -.25s; }
+@keyframes wiggle { from { rotate: -1.5deg; } to { rotate: 1.5deg; } }
+@media (prefers-reduced-motion: reduce) { .main.editing .coin-face { animation: none; } }
+
+/* «Що нового» */
+.changes h3 { margin: 0 0 6px; font-size: 15px; }
+.changes ul { margin: 0; padding-left: 20px; display: grid; gap: 6px; line-height: 1.4; }
+.changes-list { gap: 18px; padding-bottom: 8px; }
+
+/* «Про застосунок» */
+.about-head { display: flex; align-items: center; gap: 12px; }
+.about-head h2 { margin: 0 0 2px; }
+.about-head p { margin: 2px 0; }
+.about-author a, .set-card a { color: var(--brand); font-weight: 600; text-decoration: none; }
+.about-avatar { flex: none; width: 64px; height: 64px; border-radius: 50%; object-fit: cover;
+  background: var(--surface-2); box-shadow: 0 0 0 1px var(--line); }
+.about-more { margin-top: 6px; border-top: 1px solid var(--line); }
+.about-more > summary { padding: 8px 0; color: var(--brand); font-size: 13px; font-weight: 700; cursor: pointer; list-style: none; }
+.about-more > summary::-webkit-details-marker { display: none; }
+.about-more > summary::after { content: ' ›'; }
+.about-more[open] > summary::after { content: ' ⌄'; }
+.about-more p { margin: 0 0 8px; line-height: 1.45; }
+.about-steps { counter-reset: st; display: grid; gap: 8px; margin: 4px 0 10px; padding: 0; list-style: none; font-size: 13px; color: var(--text-2); }
+.about-steps > li { position: relative; padding-left: 32px; line-height: 1.45; }
+.about-steps > li::before {
+  counter-increment: st; content: counter(st);
+  position: absolute; left: 0; top: 1px; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%;
+  background: var(--brand); color: var(--brand-ink); font-size: 12px; font-weight: 700;
+}
