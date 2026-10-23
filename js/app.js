@@ -815,15 +815,15 @@ function viewFeed() {
     const dayOps = ops.filter((op) => op.date === date);
     const { expense, income } = totals(date);
     const change = income - expense;
-    blocks.push(h('h2', { class: 'day-title' }, M.dayHead(date, today)),
+    blocks.push(h('section', { class: 'day' }, h('h2', { class: 'day-title' }, M.dayHead(date, today)),
       h('div', { class: 'card' },
         dayOps.map(opRow),
         feedCoin ? coinDayFoot(coin(feedCoin), dayOps) : h('div', { class: 'day-foot' },
           h('div', {}, h('b', {}, M.money(Math.round(bal))), h('span', {}, 'на рахунках')),
-          h('div', {}, h('b', { class: change > 0 ? 'plus' : change < 0 ? 'minus' : '' }, M.money(change, 'UAH', { sign: change > 0 ? '+ ' : change < 0 ? '− ' : '' })), h('span', {}, 'зміна')))));
+          h('div', {}, h('b', { class: change > 0 ? 'plus' : change < 0 ? 'minus' : '' }, M.money(change, 'UAH', { sign: change > 0 ? '+ ' : change < 0 ? '− ' : '' })), h('span', {}, 'зміна'))))));
     bal -= delta.get(date) ?? 0;
   }
-  return h('div', { class: 'stack' }, blocks,
+  return h('div', { class: 'page stack feed' }, blocks,
     days.length > shown.length ? h('button', { type: 'button', class: 'more-btn', onClick: () => { feedDays += 60; render(); } }, 'Показати ще') : null);
 }
 
@@ -1472,7 +1472,8 @@ function topbar() {
   }
   const { title } = VIEWS[view];
   bar.className = 'topbar brand';
-  bar.replaceChildren(
+  // replaceChildren — не h(): null вивів би текстом «null», тож порожні кнопки відсіюємо
+  bar.replaceChildren(...[
     h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Назад', onClick: () => (history.length > 1 ? history.back() : go('main')) }, icon('back')),
     h('h1', {}, typeof title === 'function' ? title() : title),
     view === 'report' ? h('button', {
@@ -1481,7 +1482,7 @@ function topbar() {
     view === 'report' ? h('button', {
       type: 'button', class: `icon-btn${reportTags ? ' on' : ''}`, 'aria-pressed': String(reportTags), 'aria-label': 'За тегами',
       onClick: () => { reportTags = !reportTags; reportPick = null; toast(reportTags ? 'Звіт за тегами' : 'Звіт за монетами'); render(); },
-    }, icon('tag')) : null);
+    }, icon('tag')) : null].filter(Boolean));
 }
 
 // Підпис монети, що не влазить у рядок, — дрібніше рівно настільки, щоб влізти, але не менше 9px
