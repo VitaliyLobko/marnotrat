@@ -63,7 +63,10 @@ window.addEventListener('popstate', () => {
  * 'drawer' — меню зліва. Повертає close().
  */
 export function sheet(title, content, { onClose, cls = '', bare = false } = {}) {
-  openSheet?.close();
+  // Шторка міняє шторку (тип монети «Витрата» → «Ціль»): запис в історії той самий. Інакше history.back
+  // від старої прийшов би вже після відкриття нової й закрив би її — форма зникала без сліду
+  const replacing = Boolean(openSheet);
+  openSheet?.close(true);
   const layer = $('layer');
   const close = (fromHistory = false) => {
     if (openSheet !== api) return;
@@ -83,7 +86,7 @@ export function sheet(title, content, { onClose, cls = '', bare = false } = {}) 
   layer.replaceChildren(backdrop, panel);
   document.body.classList.add('layer-open');
   openSheet = api;
-  history.pushState({ sheet: true }, '');
+  if (!replacing || !history.state?.sheet) history.pushState({ sheet: true }, '');
   // Фокус на саму шторку, не на поле: інакше на телефоні одразу вискакує клавіатура
   panel.focus({ preventScroll: true });
   return close;
