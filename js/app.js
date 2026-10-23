@@ -1,5 +1,6 @@
 // Марнотрат: головна з монетами, екран суми, стрічка, звіти, налаштування.
 import { loadAll, write, uid, replaceAll, putFile, getFile, dropFilesExcept } from './db.js';
+import { slAvailable, cartridges, addBuy, removeBuy } from './ammo.js';
 import * as M from './model.js';
 import * as Sync from './sync.js';
 import { demoChanges, demoRemoval, hasDemo } from './demo.js';
@@ -672,6 +673,7 @@ function openAmount({ from, to, op = null, preset = null }) {
     if (two) rec.amountTo = b;
     if (d.warranty) rec.warranty = d.warranty;
     if (d.photos.length) rec.photos = d.photos;
+    if (op?.ammo) rec.ammo = op.ammo;
     if (preset) { rec.fromRule = preset.rule.id; rec.ruleDate = preset.date; }
     if (op?.fromRule) { rec.fromRule = op.fromRule; rec.ruleDate = op.ruleDate; }
     if (canRepeat && d.repeat.every) rec.repeat = { every: d.repeat.every, until: d.repeat.until, skip: op?.repeat?.skip ?? [] };
@@ -684,6 +686,7 @@ function openAmount({ from, to, op = null, preset = null }) {
       label: 'Скасувати',
       run: () => save(op ? { ops: { put: [{ ...op }] } } : { ops: { del: [rec.id] } }),
     });
+    if (wantsAmmo(rec)) offerAmmo(rec);
   };
   const remove = async () => {
     closeSheet();
@@ -855,7 +858,8 @@ function opRow(op) {
   const sign = t === 'expense' ? '− ' : t === 'income' ? '+ ' : '';
   const every = op.plan ? op.rule.repeat.every : op.repeat?.every;
   const note = [(op.tags ?? []).map((x) => `#${x}`).join(' '), op.comment, every ? `⟳ ${M.repeatLabel(every)}` : '',
-    op.warranty && !op.plan ? `гарантія до ${dmy(op.warranty)}` : '', op.photos?.length && !op.plan ? `фото: ${op.photos.length}` : ''].filter(Boolean);
+    op.warranty && !op.plan ? `гарантія до ${dmy(op.warranty)}` : '', op.photos?.length && !op.plan ? `фото: ${op.photos.length}` : '',
+    op.ammo?.qty && !op.plan ? `на склад: ${op.ammo.qty} шт` : ''].filter(Boolean);
   const second = op.amountTo != null && t === 'transfer' ? ` → ${M.money(op.amountTo, dst.currency)}` : '';
   // Запланований повтор: тап — провести з правкою суми, свайп вправо — провести як є, вліво — пропустити чи зупинити
   if (op.plan) {
@@ -2012,6 +2016,85 @@ function viewWarranty() {
     h('p', { class: 'muted small' }, 'Фото чеків зберігаються лише на цьому телефоні — у Google Диск і резервну копію вони не йдуть.'),
     active.length ? h('div', { class: 'card' }, active.map(row)) : h('p', { class: 'empty' }, 'Діючих гарантій немає'),
     over.length ? h('details', { class: 'card fold-card' }, h('summary', {}, `Скінчились (${over.length})`), over.map(row)) : null);
+}
+
+// ---------- патрони на склад Стрілецького журналу ----------
+
+const AMMO_TAGS = ['патрони', 'набої'];
+const wantsAmmo = (op) => opType(op) === 'expense' && !op.ammo && (op.tags ?? []).some((t) => AMMO_TAGS.includes(t.toLowerCase()));
+
+/** Після покупки з тегом #патрони: який патрон і скільки — і рух «купівля» в журнал. */
+async function offerAmmo(rec) {
+  if (!(await slAvailable())) return;
+  let list;
+  try { list = await cartridges(); } catch { return; }
+  // Екран суми ще закривається через history.back — нова шторка має відкритись після нього, інакше він її й закриє
+  if (history.state?.sheet) await new Promise((r) => { addEventListener('popstate', r, { once: true }); setTimeout(r, 600); });
+  const latest = () => state.ops.find((o) => o.id === rec.id);
+  const uah = M.round2(toUah(rec.amount, coinOr(rec.from).currency));
+  if (!list.length) {
+    const close = sheet('Патрони на склад', h('div', { class: 'form' },
+      h('p', {}, 'У Стрілецькому журналі ще немає жодного патрона. Додай його там, а потім відкрий цю покупку й збережи ще раз.'),
+      h('div', { class: 'btn-grid' },
+        h('a', { class: 'btn', href: '../shooting-log/' }, 'Відкрити журнал'),
+        h('button', { type: 'button', class: 'btn primary', onClick: () => close() }, 'Зрозуміло'))));
+    return;
+  }
+  let pick = list.length === 1 ? list[0].id : null;
+  const qty = h('input', { type: 'number', inputmode: 'numeric', min: '1', step: '1', class: 'field', placeholder: 'Скільки штук', 'aria-label': 'Кількість, шт' });
+  const each = h('p', { class: 'muted small' }, `Сума покупки: ${M.money(uah)}`);
+  const showEach = () => {
+    const n = Number(qty.value);
+    each.textContent = n > 0 ? `${M.money(uah)} — це ${M.money(M.round2(uah / n))} за штуку` : `Сума покупки: ${M.money(uah)}`;
+  };
+  qty.addEventListener('input', showEach);
+  // Чипи — типові пачки, як у журналі
+  const quick = h('div', { class: 'chips' }, [20, 50, 100, 200, 500].map((n) => h('button', {
+    type: 'button', class: 'chip', onClick: () => { qty.value = String(n); showEach(); },
+  }, String(n))));
+  // Патрони групами за калібром, найбільший залишок — першим
+  const byCal = new Map();
+  for (const c of [...list].sort((a, b) => b.stock - a.stock)) byCal.set(c.caliber || 'Інші', [...(byCal.get(c.caliber || 'Інші') ?? []), c]);
+  const btns = [];
+  const pickRows = [...byCal].map(([cal, cs]) => [h('p', { class: 'flabel' }, cal), h('div', { class: 'chips' }, cs.map((c) => {
+    const b = h('button', {
+      type: 'button', class: `chip${c.id === pick ? ' on' : ''}`,
+      onClick: () => { pick = c.id; for (const x of btns) x.classList.toggle('on', x === b); },
+    }, `${c.name} · ${c.stock} шт`);
+    btns.push(b);
+    return b;
+  }))]);
+  const skip = async () => {
+    close();
+    const cur = latest();
+    if (cur) await save({ ops: { put: [{ ...cur, ammo: { skip: true } }] } });
+  };
+  const store = async () => {
+    const c = list.find((x) => x.id === pick);
+    const n = Math.round(Number(qty.value));
+    if (!c) { toast('Вибери патрон'); return; }
+    if (!(n > 0)) { toast('Скільки штук?'); qty.focus(); return; }
+    const mv = { id: uid(), date: rec.date, cartridgeId: c.id, caliber: c.caliber, qty: n, price: uah, note: rec.comment || 'Марнотрат' };
+    try { await addBuy(mv); } catch (err) { toast(`Не вдалося записати: ${err.message}`); return; }
+    close();
+    const cur = latest();
+    if (cur) await save({ ops: { put: [{ ...cur, ammo: { id: mv.id, qty: n, name: c.name } }] } });
+    toast(`+${n} шт · ${c.name} — на складі`, {
+      label: 'Скасувати',
+      run: async () => {
+        await removeBuy(mv.id);
+        const o = latest();
+        if (o) { const { ammo, ...rest } = o; await save({ ops: { put: [rest] } }); }
+      },
+    });
+  };
+  const close = sheet('Патрони на склад', h('div', { class: 'form' },
+    h('p', { class: 'muted small' }, 'Покупка з тегом #патрони — записати її на склад Стрілецького журналу?'),
+    pickRows,
+    h('label', { class: 'flabel' }, 'Скільки штук'), qty, quick, each,
+    h('div', { class: 'btn-grid' },
+      h('button', { type: 'button', class: 'btn', onClick: skip }, 'Не треба'),
+      h('button', { type: 'button', class: 'btn primary', onClick: store }, icon('check'), 'На склад'))));
 }
 
 // ---------- звірка залишків ----------
