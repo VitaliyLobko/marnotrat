@@ -42,6 +42,7 @@
 }
 
 :root[data-theme="dark"] {
+  /* монети приглушені: на темному тлі яскрава заливка сліпить; жовтий і помаранчевий — насиченими, бо затемнені вони буріють */
   --bg: #121417;
   --surface: #1b1e22;
   --surface-2: #252930;
@@ -51,19 +52,19 @@
   --muted: #959ca5;
   --brand: #0e9e6f;
   --brand-ink: #f2fffa;
-  --inc: #1b93c0;
+  --inc: #1a7699;
   --inc-ink: #4cc2ec;
-  --acc: #d9ad00;
-  --acc-ink: #f2c230;
+  --acc: #c69a00;
+  --acc-ink: #dcb442;
   --coin-empty: #3a3f47;
-  --goal: #179fb0;
+  --goal: #167f8c;
   --goal-ink: #4fd3e3;
-  --coin-ico: #eef1f4;
-  --ok: #10a874;
+  --coin-ico: #e2e5e9;
+  --ok: #138a62;
   --ok-ink: #3ad39c;
-  --warn: #e07a00;
+  --warn: #cc6e00;
   --warn-ink: #ffa033;
-  --over: #c8332f;
+  --over: #b8302b;
   --over-ink: #ff6b66;
   --plus: #3ad39c;
   --minus: #ff6b66;
@@ -164,7 +165,7 @@ a { color: var(--brand); }
 }
 /* витрату гортають в обидва боки; рахунок, дохід і ціль — лише вбік: рух униз чи навскіс уже перетягування */
 .k-expense .coin-face { touch-action: pan-x pan-y; }
-.k-income .coin-face, .k-account .coin-face, .k-goal .coin-face { touch-action: pan-x; }
+.k-income .coin-face, .k-account .coin-face, .k-goal .coin-face, .k-debt .coin-face { touch-action: pan-x; }
 .coin-face .coin-ico { position: relative; z-index: 1; }
 /* іконка — близько половини монети, тонкою лінією */
 .coin-face .coin-ico { width: 50%; }
@@ -207,7 +208,10 @@ a { color: var(--brand); }
 .coin:not(.coin-ghost) .coin-face:active { transform: scale(.93); }
 .coin.bump .coin-face { animation: bump .45s ease-out; }
 @keyframes bump { 40% { transform: scale(1.1); } }
-@media (prefers-reduced-motion: reduce) { .coin .coin-face, .coin.drop-over .coin-face, .coin.bump .coin-face { animation: none; transition: none; } }
+/* ціль «ловить» монету, яку на неї кинули */
+.coin-face.catch { animation: catch .32s ease-out; }
+@keyframes catch { 0% { transform: scale(1.12); } 45% { transform: scale(.9); } 100% { transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) { .coin .coin-face, .coin.drop-over .coin-face, .coin.bump .coin-face, .coin-face.catch { animation: none; transition: none; } }
 .coin.drag-src .coin-face { opacity: .4; }
 .coin-ghost {
   position: fixed; z-index: 60; pointer-events: none; margin: 0;
@@ -313,14 +317,28 @@ a { color: var(--brand); }
 }
 @keyframes drawer-in { from { transform: translateX(-100%); } }
 @media (prefers-reduced-motion: reduce) { .sheet.drawer { animation: none; } }
+.menu { display: flex; flex-direction: column; min-height: 100%; }
+.menu-head { display: flex; align-items: center; gap: 14px; padding: 22px 20px 18px; border-bottom: 1px solid var(--line); }
+.menu-logo { width: 44px; height: 44px; border-radius: 12px; flex: none; }
+.menu-head > span { display: flex; flex-direction: column; min-width: 0; }
+.menu-head b { font-size: 20px; font-weight: 700; }
+.menu-head b + span { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.menu-group { padding: 6px 0; }
+.menu-group + .menu-group { border-top: 1px solid var(--line); }
+.menu-cap { margin: 10px 24px 2px; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
 .menu-item {
-  display: flex; align-items: center; gap: 22px; width: 100%; padding: 16px 24px;
-  border: 0; background: none; text-align: left; font-size: 18px; color: var(--text-2);
+  display: flex; align-items: center; gap: 18px; width: calc(100% - 16px); margin: 2px 8px; padding: 12px 16px;
+  border: 0; border-radius: 12px; background: none; text-align: left; font-size: 17px; color: var(--text-2); cursor: pointer;
 }
+.menu-item:hover { background: var(--surface-2); }
+.menu-item.on { background: color-mix(in srgb, var(--brand) 14%, transparent); color: var(--text); font-weight: 600; }
 .menu-item .ico { color: var(--brand); }
-.menu-item .ico svg { width: 26px; height: 26px; stroke-width: 1.5; }
-.menu-foot { margin-top: auto; padding: 16px 24px; border-top: 1px solid var(--line); }
-.menu-brand { padding: 22px 24px 10px; font-size: 22px; font-weight: 700; }
+.menu-item .ico svg { width: 24px; height: 24px; stroke-width: 1.6; }
+.menu-label { flex: 1; }
+.menu-badge { min-width: 24px; padding: 2px 8px; border-radius: 12px; background: var(--surface-2); color: var(--text-2); font-size: 13px; font-weight: 600; text-align: center; font-variant-numeric: tabular-nums; }
+.menu-badge.warn { background: var(--warn); color: #fff; }
+.menu-foot { margin-top: auto; padding: 6px 0 10px; border-top: 1px solid var(--line); }
+.menu-ver { margin: 4px 24px 0; color: var(--muted); font-size: 12px; }
 
 .form { display: flex; flex-direction: column; gap: 10px; }
 .flabel { margin: 4px 0 0; font-size: 14px; color: var(--muted); }
@@ -509,3 +527,127 @@ details.icon-group > .icon-row { padding-bottom: 10px; }
 }
 .plan-hint .ico:first-child { color: var(--brand); }
 .plan-hint .ico:last-child { margin-left: auto; color: var(--muted); }
+
+/* пошук і тип у стрічці */
+.feed-tools { display: grid; gap: 8px; }
+.feed-tools .chips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.feed-found { display: flex; justify-content: space-between; margin: 0 4px; color: var(--muted); font-size: 14px; }
+.feed-found b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* борг: сіра монета з обідком — зелений «винні мені», червоний «я винен», закритий — тьмяний */
+.k-debt .coin-face { background: var(--coin-empty); box-shadow: inset 0 0 0 5px var(--line); }
+.k-debt.st-owed .coin-face { box-shadow: inset 0 0 0 5px var(--plus); }
+.k-debt.st-owe .coin-face { box-shadow: inset 0 0 0 5px var(--minus); }
+.k-debt.st-closed .coin-face { opacity: .55; }
+.k-debt.st-owed .coin-sum { color: var(--plus); }
+.k-debt.st-owe .coin-sum { color: var(--minus); }
+.k-debt.st-closed .coin-sum { color: var(--muted); }
+.k-debt.late .coin-sub { color: var(--warn-ink); font-weight: 700; }
+.mini-coin.k-debt { background: var(--coin-empty); box-shadow: inset 0 0 0 2px var(--muted); }
+.plan-hint.debt .ico:first-child { color: var(--warn); }
+
+/* регулярні платежі */
+.sub-total { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; padding: 14px 16px; }
+.sub-total div { display: flex; flex-direction: column; gap: 2px; }
+.sub-total span { color: var(--muted); font-size: 13px; }
+.sub-total b { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.sub-row { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.sub-row:last-child { border-bottom: 0; }
+.sub-main { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.sub-text { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.sub-text b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sub-text span { color: var(--muted); font-size: 13px; }
+.sub-sum { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sub-sum.expense { color: var(--minus); }
+.sub-sum.income { color: var(--plus); }
+.btn.small { min-height: 34px; padding: 4px 10px; font-size: 13px; }
+.fold-card > summary { padding: 12px 16px; color: var(--muted); cursor: pointer; }
+/* звірка залишків */
+.rec-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.rec-row:last-child { border-bottom: 0; }
+.rec-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.rec-name > span:last-child { display: flex; flex-direction: column; min-width: 0; }
+.rec-row .field { width: 40%; max-width: 160px; text-align: right; }
+
+/* гарантії й фото чеків */
+.warranty-line { display: grid; gap: 8px; }
+.photo-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.photo-thumb { position: relative; width: 64px; height: 64px; border-radius: 10px; overflow: hidden; background: var(--line); }
+.photo-thumb.missing { display: grid; place-items: center; padding: 4px; color: var(--muted); font-size: 11px; text-align: center; line-height: 1.2; }
+.photo-open { display: block; width: 100%; height: 100%; padding: 0; border: 0; background: none; cursor: zoom-in; }
+.photo-open img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.photo-x { position: absolute; top: 2px; right: 2px; width: 22px; height: 22px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: rgba(0, 0, 0, .6); color: #fff; cursor: pointer; }
+.photo-x .ico { width: 14px; height: 14px; }
+.photo-add { width: 64px; height: 64px; display: grid; place-items: center; border: 1.5px dashed var(--muted); border-radius: 10px; color: var(--muted); cursor: pointer; }
+.photo-view { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 12px; background: rgba(0, 0, 0, .92); cursor: zoom-out; }
+.photo-view img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.war-row { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.war-row:last-child { border-bottom: 0; }
+.war-row .photo-row { padding-left: 42px; }
+.war-row .photo-thumb { width: 48px; height: 48px; }
+.war-soon { color: var(--warn-ink) !important; font-weight: 600; }
+.plan-hint.warranty .ico:first-child { color: var(--warn); }
+/* панель «Деталі» вища за клавіатуру — гортається, сума вгорі не стискається */
+.amt-panel { max-height: 62dvh; overflow-y: auto; }
+
+/* історія */
+.hist-card { padding: 14px 12px 10px; display: flex; flex-direction: column; gap: 8px; }
+.hist-read { display: flex; flex-direction: column; gap: 2px; padding: 0 4px; }
+.hist-read span { color: var(--muted); font-size: 13px; }
+.hist-read b { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.hist-svg { width: 100%; height: auto; display: block; overflow: visible; }
+.hist-zero { stroke: var(--line); stroke-width: 1; }
+.hist-bar { transition: opacity .15s; }
+.hist-col.now .hist-bar { opacity: .55; }
+.hist-col.on .hist-bar { opacity: 1; }
+.hist-fc { fill: none; stroke: var(--s1); stroke-width: 1.5; stroke-dasharray: 3 3; }
+.hist-x { fill: var(--muted); font-size: 11px; text-anchor: middle; }
+.hist-col.on .hist-x { fill: var(--text); font-weight: 700; }
+.hist-hit { fill: transparent; cursor: pointer; outline: none; }
+.hist-hit:focus-visible { stroke: var(--brand); stroke-width: 2; }
+.hist-col.on .hist-hit { fill: var(--text); fill-opacity: .06; }
+.hist-avg { stroke: var(--text-2); stroke-width: 1.5; stroke-dasharray: 6 4; }
+.hist-avg-t { fill: var(--text-2); font-size: 11px; }
+.hist-key { display: flex; gap: 14px; margin: 0 4px; }
+.hist-key:empty { display: none; }
+.hist-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.hist-table td { padding: 8px 16px; border-top: 1px solid var(--line); }
+.hist-table td:last-child { text-align: right; }
+
+/* оформлення 0.2.7: герой-картка, пілюлі, порожні екрани */
+.hero { display: flex; flex-direction: column; gap: 4px; padding: 16px 18px; background: linear-gradient(135deg, color-mix(in srgb, var(--brand) 16%, var(--surface)), var(--surface) 70%); }
+.hero-cap { color: var(--text-2); font-size: 14px; font-weight: 600; }
+.hero-num { font-size: 30px; font-weight: 700; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+.hero-sub { color: var(--muted); font-size: 13px; line-height: 1.45; }
+.hero-sub.plus { color: var(--plus); }
+.pill { display: inline-block; padding: 2px 8px; border-radius: 10px; background: var(--surface-2); color: var(--text-2); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.pill.warn { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn-ink); }
+.pill.ok { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok-ink); }
+.sub-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.sub-row { padding: 12px 8px 12px 14px; }
+.sub-row.off { opacity: .6; }
+.sub-act { flex: none; color: var(--muted); }
+.sub-act:hover { color: var(--text); }
+.war-row { padding: 12px 14px; }
+.war-row.over { opacity: .65; }
+.war-bar { height: 4px; margin-left: 42px; border-radius: 2px; background: var(--surface-2); overflow: hidden; }
+.war-bar span { display: block; width: var(--p); height: 100%; border-radius: 2px; background: var(--ok); }
+.war-row.soon .war-bar span { background: var(--warn); }
+.war-row.over .war-bar span { background: var(--muted); }
+.foot-note { display: flex; gap: 8px; align-items: flex-start; margin: 4px; color: var(--muted); font-size: 13px; line-height: 1.4; }
+.foot-note .ico svg { width: 16px; height: 16px; }
+.rec-in { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; width: 42%; max-width: 170px; }
+.rec-in .field { width: 100%; max-width: none; text-align: right; font-variant-numeric: tabular-nums; }
+.rec-diff { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rec-diff.plus { color: var(--plus); font-weight: 600; }
+.rec-diff.minus { color: var(--minus); font-weight: 600; }
+.btn:disabled { opacity: .5; cursor: default; }
+.empty-state { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 48px 24px; text-align: center; }
+.empty-state b { font-size: 18px; }
+.empty-state p { margin: 0; max-width: 300px; color: var(--muted); line-height: 1.45; }
+.empty-ico { display: grid; place-items: center; width: 72px; height: 72px; border-radius: 50%; background: color-mix(in srgb, var(--brand) 14%, transparent); color: var(--brand); }
+.empty-ico svg { width: 34px; height: 34px; stroke-width: 1.6; }
+
+/* екран суми з цілі: скільки там є */
+.amt-avail { align-self: flex-end; margin: 2px 0 0; padding: 4px 10px; border: 0; border-radius: 12px; background: color-mix(in srgb, var(--goal) 18%, transparent); color: var(--goal-ink); font-size: 13px; font-weight: 600; cursor: pointer; }
+.amt-avail[hidden] { display: none; }

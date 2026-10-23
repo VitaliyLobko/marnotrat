@@ -135,7 +135,7 @@ export const toExpr = (v) => (v ? String(round2(v)).replace('.', ',') : '');
 
 // ---------- монети ----------
 
-export const KINDS = { income: 'Дохід', account: 'Рахунок', expense: 'Витрата', goal: 'Ціль' };
+export const KINDS = { income: 'Дохід', account: 'Рахунок', expense: 'Витрата', goal: 'Ціль', debt: 'Борг' };
 
 /** Яка частка місяця минула на кінець дня date: 23 жовтня — 23/31. */
 export function monthElapsed(date = ymd()) {

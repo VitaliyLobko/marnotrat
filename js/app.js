@@ -1,5 +1,6 @@
 // Марнотрат: головна з монетами, екран суми, стрічка, звіти, налаштування.
-import { loadAll, write, uid, replaceAll } from './db.js';
+import { loadAll, write, uid, replaceAll, putFile, getFile, dropFilesExcept } from './db.js';
+import { slAvailable, readJournal, addRecord, patchRecord, removeRecord } from './journal.js';
 import * as M from './model.js';
 import * as Sync from './sync.js';
 import { demoChanges, demoRemoval, hasDemo } from './demo.js';
@@ -11,7 +12,11 @@ let view = 'main';
 // Стрічка однієї монети (тап по монеті) — її id; інакше null
 let feedCoin = null;
 let feedDays = 60;
+// Пошук і тип у стрічці: живуть, поки застосунок відкритий
+let feedQuery = '';
+let feedType = 'all';
 let reportKind = 'expense';
+// Період звіту — ключ «РРРР-ММ» місяця, у якому він починається (див. periodOf); стан ще не завантажено — календарний
 let reportMonth = M.monthOf(M.ymd());
 let reportPick = null;
 // Звіт «Загальний»: свій період і рахунки (фільтр), розбивка за тегами замість монет
@@ -113,16 +118,55 @@ async function runSync({ gesture = false, loud = false } = {}) {
 
 // ---------- підрахунки ----------
 
-function balance(acc) {
+function balance(acc, ops = state.ops) {
   let v = acc.start || 0;
-  for (const op of state.ops) {
+  for (const op of ops) {
     if (op.to === acc.id) v += amountIn(op);
     if (op.from === acc.id) v -= op.amount;
   }
   return M.round2(v);
 }
 
-const inMonth = (op, ym) => op.date.startsWith(ym);
+// ---------- період обліку: місяць від дня N (наприклад, від зарплати) ----------
+
+/** День, з якого починається обліковий місяць: 1–28, у meta — спільний для всіх телефонів. */
+const startDay = () => state.meta.find((m) => m.id === 'period')?.day ?? 1;
+const dd = (n) => String(n).padStart(2, '0');
+
+/** Ключ періоду для дати: місяць, у якому період почався. День 1 — звичайний календарний місяць. */
+function periodOf(date) {
+  const ym = M.monthOf(date);
+  return Number(date.slice(8, 10)) >= startDay() ? ym : M.addMonths(ym, -1);
+}
+
+/** Межі періоду включно: з N-го цього місяця до (N−1)-го наступного. */
+function periodRange(ym) {
+  const n = startDay();
+  return [`${ym}-${dd(n)}`, M.addDays(`${M.addMonths(ym, 1)}-${dd(n)}`, -1)];
+}
+
+const currentPeriod = () => periodOf(M.ymd());
+
+/** «жовтень 2026» для календарного місяця; зі свого дня — «05.10 – 04.11.2026». */
+function periodTitle(ym) {
+  if (startDay() === 1) return M.monthTitle(ym);
+  const [lo, hi] = periodRange(ym);
+  const f = (x) => `${x.slice(8, 10)}.${x.slice(5, 7)}`;
+  return `${f(lo)} – ${f(hi)}.${hi.slice(0, 4)}`;
+}
+
+/** Яка частка періоду минула на кінець сьогоднішнього дня. */
+function periodElapsed(ym) {
+  const [lo, hi] = periodRange(ym);
+  const day = 24 * 60 * 60 * 1000;
+  const len = (M.parseYmd(hi) - M.parseYmd(lo)) / day + 1;
+  return Math.min(1, Math.round((M.parseYmd(M.ymd()) - M.parseYmd(lo)) / day + 1) / Math.round(len));
+}
+
+const inMonth = (op, ym) => {
+  const [lo, hi] = periodRange(ym);
+  return op.date >= lo && op.date <= hi;
+};
 
 function monthSpent(c, ym) {
   return state.ops.reduce((s, op) => (op.to === c.id && inMonth(op, ym) ? s + amountIn(op) : s), 0);
@@ -133,22 +177,25 @@ function monthIncome(c, ym) {
 }
 
 /** Як операція міняє гроші на рахунках, у гривнях: дохід +, витрата −, переказ — лише різниця курсів. */
+// Що входить у «Баланс»: рахунки й борги з позначкою «враховувати»; ціль — відкладене, не входить
+const inBalance = (c) => c.kind === 'account' || (c.kind === 'debt' && Boolean(c.inBalance));
+
 function accDelta(op) {
-  // Рахується лише те, що на рахунках: ціль — відкладене, у «Баланс» не входить
   const src = coinOr(op.from);
   const dst = coinOr(op.to);
   let v = 0;
-  if (dst.kind === 'account') v += toUah(amountIn(op), dst.currency);
-  if (src.kind === 'account') v -= toUah(op.amount, src.currency);
+  if (inBalance(dst)) v += toUah(amountIn(op), dst.currency);
+  if (inBalance(src)) v -= toUah(op.amount, src.currency);
   return v;
 }
 
-/** Витрати й доходи за період у гривнях (date — день чи місяць «2026-10»). */
-function totals(prefix) {
+/** Витрати й доходи в гривнях: за день («РРРР-ММ-ДД») чи за період обліку (ключ «РРРР-ММ»). */
+function totals(key) {
   let expense = 0;
   let income = 0;
+  const hit = key.length === 7 ? (op) => inMonth(op, key) : (op) => op.date === key;
   for (const op of state.ops) {
-    if (!op.date.startsWith(prefix)) continue;
+    if (!hit(op)) continue;
     const t = opType(op);
     if (t === 'expense') expense += toUah(amountIn(op), coinOr(op.to).currency);
     else if (t === 'income') income += toUah(op.amount, coinOr(op.from).currency);
@@ -156,8 +203,7 @@ function totals(prefix) {
   return { expense, income };
 }
 
-const totalBalance = () => coinsOf('account').reduce((s, a) => s + toUah(balance(a), a.currency), 0)
-  + state.coins.filter((c) => c.kind === 'account' && c.archived).reduce((s, a) => s + toUah(balance(a), a.currency), 0);
+const totalBalance = () => state.coins.filter(inBalance).reduce((s, a) => s + toUah(balance(a), a.currency), 0);
 
 // ---------- головна ----------
 
@@ -167,7 +213,7 @@ const planTotal = () => state.coins
   .reduce((s, c) => s + toUah(c.budget, c.currency), 0);
 
 function headStats() {
-  const { expense, income } = totals(M.monthOf(M.ymd()));
+  const { expense, income } = totals(currentPeriod());
   const plan = planTotal();
   // Підсумки в гривнях — без копійок: долари за курсом дають «54 451,10». Тап — куди дивитись далі
   const stat = (label, v, onClick, cls = '') => h('button', { type: 'button', class: 'stat', onClick },
@@ -182,9 +228,9 @@ function headStats() {
 }
 
 /** Колір монети витрати за поточний місяць — з темпом і кількістю операцій. */
-function coinBudget(c, spent, ym = M.monthOf(M.ymd())) {
+function coinBudget(c, spent, ym = currentPeriod()) {
   const count = state.ops.filter((op) => op.to === c.id && inMonth(op, ym)).length;
-  const elapsed = ym === M.monthOf(M.ymd()) ? M.monthElapsed() : 1;
+  const elapsed = ym === currentPeriod() ? periodElapsed(ym) : 1;
   return M.budgetState(spent, c.budget, { elapsed, count });
 }
 
@@ -211,7 +257,7 @@ function animateSums() {
 
 /** Маленька монета для рядків і шапки екрана суми — того ж кольору, що на головній. */
 function miniCoin(c) {
-  const st = c.kind === 'expense' ? coinBudget(c, monthSpent(c, M.monthOf(M.ymd()))).st : '';
+  const st = c.kind === 'expense' ? coinBudget(c, monthSpent(c, currentPeriod())).st : '';
   return h('span', { class: `mini-coin k-${c.kind}${st ? ` st-${st}` : ''}`, 'aria-hidden': 'true' }, icon(hasIcon(c.icon) ? c.icon : 'coins'));
 }
 
@@ -225,6 +271,14 @@ function coinEl(c, ym) {
     if (c.budget) sub = M.num(c.budget);
   } else if (c.kind === 'account') {
     sum = balance(c);
+  } else if (c.kind === 'debt') {
+    // Борг: плюс — винні мені, мінус — винен я; сума без знака, напрям — кольором і підписом
+    const bal = balance(c);
+    sum = Math.abs(bal);
+    st = bal > 0 ? 'owed' : bal < 0 ? 'owe' : 'closed';
+    const late = bal !== 0 && c.due && c.due <= M.ymd();
+    sub = `${bal > 0 ? 'винні мені' : bal < 0 ? 'я винен' : 'повернуто'}${bal !== 0 && c.due ? ` · ${late ? 'час!' : `до ${c.due.slice(8, 10)}.${c.due.slice(5, 7)}`}` : ''}`;
+    if (late) st += ' late';
   } else if (c.kind === 'goal') {
     // Ціль: відкладено / скільки треба; кільце — частка зібраного
     sum = balance(c);
@@ -301,19 +355,35 @@ function pager(key, items, perPage, cls) {
 
 /** Рядок на головній: заплановані повтори, яким уже пора, — тап веде в стрічку. */
 function planHint() {
+  if (editing()) return null;
   const n = dueCount();
-  if (!n || editing()) return null;
-  return h('button', { type: 'button', class: 'plan-hint', onClick: () => go('feed') }, icon('refresh'), `До проведення: ${n}`, icon('next'));
+  // Борги, яким настав строк і які ще не закриті
+  const late = coinsOf('debt').filter((c) => c.due && c.due <= M.ymd() && Math.abs(balance(c)) >= 0.01);
+  const rows = late.map((c) => {
+    const bal = balance(c);
+    return h('button', { type: 'button', class: 'plan-hint debt', onClick: () => openFeed(c.id) }, icon('handshake'),
+      `${c.name}: ${bal > 0 ? 'час повернути тобі' : 'час віддати'} ${M.money(Math.abs(bal), c.currency)}`, icon('next'));
+  });
+  if (n) rows.unshift(h('button', { type: 'button', class: 'plan-hint', onClick: () => go('feed') }, icon('refresh'), `До проведення: ${n}`, icon('next')));
+  // Гарантія спливає за місяць — ще є час звернутись
+  const ending = warrantyOps().filter((op) => daysLeft(op.warranty) >= 0 && daysLeft(op.warranty) <= WARRANTY_SOON);
+  if (ending.length) {
+    const first = ending[0];
+    rows.push(h('button', { type: 'button', class: 'plan-hint warranty', onClick: () => go('warranty') }, icon('shield'),
+      ending.length === 1 ? `Гарантія: ${opName(first)} — до ${dmy(first.warranty)}` : `Гарантія спливає: ${ending.length} покупки за місяць`, icon('next')));
+  }
+  return rows.length ? rows : null;
 }
 
 function viewMain() {
-  const ym = M.monthOf(M.ymd());
+  const ym = currentPeriod();
   const incomeOpen = recall('income-open') === '1';
   // Цілі стоять у сітці витрат, як копилка
   const grid = state.coins.filter((c) => (c.kind === 'expense' || c.kind === 'goal') && !c.archived).sort((a, b) => a.order - b.order);
   return h('div', { class: `main${editing() ? ' editing' : ''}` },
     incomeOpen ? pager('income', [...coinsOf('income').map((c) => coinEl(c, ym)), addCoinEl('income')], 4, 'coin-row incomes') : null,
-    pager('account', [...coinsOf('account').map((c) => coinEl(c, ym)), addCoinEl('account')], 4, 'coin-row accounts'),
+    pager('account', [...state.coins.filter((c) => (c.kind === 'account' || c.kind === 'debt') && !c.archived)
+      .sort((a, b) => a.order - b.order).map((c) => coinEl(c, ym)), addCoinEl('account')], 4, 'coin-row accounts'),
     planHint(),
     pager('expense', [...grid.map((c) => coinEl(c, ym)), addCoinEl('expense')], 16, 'expenses'),
     state.ops.length ? null : h('p', { class: 'muted small main-hint' },
@@ -326,14 +396,16 @@ function viewMain() {
 function canDrop(src, dst) {
   if (!dst || src.id === dst.id) return false;
   if (src.kind === 'income') return dst.kind === 'account';
-  if (src.kind === 'account') return dst.kind === 'account' || dst.kind === 'expense' || dst.kind === 'goal';
+  if (src.kind === 'account') return dst.kind === 'account' || dst.kind === 'expense' || dst.kind === 'goal' || dst.kind === 'debt';
+  // Борг → рахунок: позичив у когось чи тобі повернули
+  if (src.kind === 'debt') return dst.kind === 'account';
   // З цілі — назад на рахунок
   if (src.kind === 'goal') return dst.kind === 'account';
   return false;
 }
 
 // Ряд, у якому монету можна переставити: цілі стоять разом із витратами
-const rowOf = (c) => (c.kind === 'goal' ? 'expense' : c.kind);
+const rowOf = (c) => (c.kind === 'goal' ? 'expense' : c.kind === 'debt' ? 'account' : c.kind);
 const canReorder = (src, dst) => Boolean(dst) && src.id !== dst.id && rowOf(src) === rowOf(dst);
 
 /** Перестановка: монета стає на місце тієї, на яку її кинули; решта ряду зсувається. */
@@ -347,8 +419,90 @@ async function reorder(src, dstId) {
   if (put.length) await save({ coins: { put } });
 }
 
+// ---------- цілі й борги: не більше, ніж є ----------
+
+/**
+ * Перевірка змін операцій (put — нові чи змінені, del — id видалених). Повертає текст, чому не можна, або null.
+ * Ціль: у мінус не йде — забрати можна лише відкладене.
+ * Борг: при новій чи зміненій операції не переходить через нуль — повернути можна лише те, що винні
+ * (видалення боргових операцій дозволене: це прибирання помилок).
+ * Монета, що вже була «зламана» (старі дані), правок, які її не погіршують, не блокує.
+ */
+function holdBreak(put = [], del = []) {
+  const ids = new Set([...put.map((o) => o.id), ...del]);
+  const without = state.ops.filter((o) => !ids.has(o.id));
+  const next = [...without, ...put];
+  const touched = new Set([...put, ...state.ops.filter((o) => ids.has(o.id))].flatMap((o) => [o.from, o.to]));
+  for (const id of touched) {
+    const c = coin(id);
+    if (c?.kind === 'goal') {
+      const after = balance(c, next);
+      if (after < -0.005 && after < balance(c) - 0.005) {
+        const avail = Math.max(0, balance(c, without));
+        return avail > 0 && put.length
+          ? `У цілі «${c.name}» лише ${M.money(avail, c.currency)} — більше не забереш`
+          : `Не можна: у цілі «${c.name}» стане мінус — з неї вже забрали ці гроші`;
+      }
+    }
+    if (c?.kind === 'debt' && put.length) {
+      const base = balance(c, without);
+      const after = balance(c, next);
+      if (Math.abs(base) >= 0.01 && Math.abs(after) >= 0.01 && Math.sign(base) !== Math.sign(after)) {
+        return base > 0
+          ? `«${c.name}» винен тобі лише ${M.money(base, c.currency)} — більше не повернеш. Позичив ще — це окрема операція`
+          : `Ти винен «${c.name}» лише ${M.money(-base, c.currency)} — більше не віддаси. Дав ще в борг — це окрема операція`;
+      }
+    }
+  }
+  return null;
+}
+
+/** Не можна — сказати чому й струснути телефоном; true, якщо зміну зупинено. */
+function refuse(put, del) {
+  const why = holdBreak(put, del);
+  if (!why) return false;
+  toast(why);
+  vibrate([30, 40, 30]);
+  return true;
+}
+
+/**
+ * ✕ на монеті, що тримає гроші: ціль — повернути на рахунок (у «Баланс» вона не входить, інакше гроші зникли б);
+ * рахунок — перенести на інший або сховати з грошима; відкритий борг — підтвердити.
+ */
+function removeHolder(c) {
+  const left = balance(c);
+  const others = coinsOf('account').filter((a) => a.id !== c.id);
+  const move = async (acc) => {
+    close();
+    const op = { id: uid(), from: c.id, to: acc.id, amount: left, date: M.ymd(), tags: [], comment: `Закрито «${c.name}»`, created: Date.now() };
+    if (acc.currency !== c.currency) op.amountTo = M.round2(left * rate(c.currency) / rate(acc.currency));
+    await save({ ops: { put: [op] }, coins: { put: [{ ...c, archived: true }] } });
+    toast(`${M.money(left, c.currency)} → ${acc.name}, «${c.name}» сховано`, {
+      label: 'Скасувати', run: () => save({ ops: { del: [op.id] }, coins: { put: [{ ...c }] } }),
+    });
+  };
+  const hide = async () => {
+    close();
+    await save({ coins: { put: [{ ...c, archived: true }] } });
+    toast(`«${c.name}» сховано`, { label: 'Скасувати', run: () => save({ coins: { put: [{ ...c }] } }) });
+  };
+  const text = c.kind === 'goal' ? `У цілі відкладено ${M.money(left, c.currency)}. На який рахунок їх повернути?`
+    : c.kind === 'account' ? `На рахунку ${M.money(left, c.currency)}. Перенести їх на інший рахунок? Якщо просто сховати — гроші лишаться в «Баланс», але рахунку на головній не буде.`
+      : `${left > 0 ? `«${c.name}» ще винен тобі` : `Ти ще винен «${c.name}»`} ${M.money(Math.abs(left), c.currency)}. Сховати борг усе одно?`;
+  const close = sheet(`Прибрати «${c.name}»?`, h('div', { class: 'form' },
+    h('p', {}, text),
+    c.kind !== 'debt' && others.length
+      ? h('div', { class: 'pick-coins' }, others.map((a) => h('button', { type: 'button', class: 'pick-coin', onClick: () => move(a) }, miniCoin(a), h('span', {}, a.name))))
+      : null,
+    h('div', { class: 'btn-grid' },
+      h('button', { type: 'button', class: 'btn', onClick: () => close() }, 'Скасувати'),
+      c.kind !== 'goal' ? h('button', { type: 'button', class: 'btn danger', onClick: hide }, 'Сховати') : null)));
+}
+
 /** ✕ на монеті: без операцій — видалити, з операціями — сховати (операції лишаються). */
 async function removeCoin(orig) {
+  if (['goal', 'account', 'debt'].includes(orig.kind) && Math.abs(balance(orig)) >= 0.01) { removeHolder(orig); return; }
   const used = state.ops.some((op) => op.from === orig.id || op.to === orig.id);
   if (used) {
     await save({ coins: { put: [{ ...orig, archived: true }] } });
@@ -365,6 +519,27 @@ const PAGE_WAIT = 600;
 
 const LONG_PRESS = 500;
 const EDGE = 70;
+
+/**
+ * Копія монети після відпускання: влучив — втягується в ціль, і та її «ловить», з подвійним відгуком;
+ * мимо — плавно вертається на місце. Без анімацій у системі — просто зникає.
+ */
+function flyGhost(ghost, target, home) {
+  if (target) {
+    vibrate([18, 40, 18]);
+    const f = target.querySelector('.coin-face');
+    f?.classList.add('catch');
+    f?.addEventListener('animationend', () => f.classList.remove('catch'), { once: true });
+  }
+  const to = (target?.querySelector('.coin-face') ?? home).getBoundingClientRect();
+  if (!ghost.animate || !to.width || matchMedia('(prefers-reduced-motion: reduce)').matches) { ghost.remove(); return; }
+  const anim = ghost.animate([{}, {
+    left: `${to.left + to.width / 2}px`, top: `${to.top + to.height / 2}px`,
+    transform: `translate(-50%, -50%) scale(${target ? 0.3 : 1})`, opacity: target ? 0 : 0.5,
+  }], { duration: target ? 200 : 260, easing: 'cubic-bezier(.3, .7, .4, 1)', fill: 'forwards' });
+  anim.onfinish = () => ghost.remove();
+  anim.oncancel = () => ghost.remove();
+}
 
 function bindCoin(el, face, c) {
   face.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -449,8 +624,9 @@ function bindCoin(el, face, c) {
       const target = drag?.over;
       const wasDrag = Boolean(drag);
       const tap = !moved && !long && ev.type === 'pointerup';
-      cleanup();
-      if (wasDrag && target && ev.type === 'pointerup') {
+      const hit = wasDrag && target && ev.type === 'pointerup';
+      cleanup(hit ? target : null);
+      if (hit) {
         if (editing()) reorder(c, target.dataset.id);
         else openAmount({ from: c.id, to: target.dataset.id });
       } else if (tap) {
@@ -458,14 +634,14 @@ function bindCoin(el, face, c) {
         else openFeed(c.id);
       }
     };
-    function cleanup() {
+    function cleanup(landed = null) {
       clearTimeout(timer);
       removeEventListener('pointermove', onMove);
       removeEventListener('pointerup', onUp);
       removeEventListener('pointercancel', onUp);
       if (!drag) return;
       cancelAnimationFrame(drag.raf);
-      drag.ghost.remove();
+      flyGhost(drag.ghost, landed, face);
       document.body.classList.remove('dragging');
       el.classList.remove('drag-src');
       for (const t of document.querySelectorAll('.drop-ok, .drop-over')) t.classList.remove('drop-ok', 'drop-over');
@@ -516,7 +692,11 @@ function openAmount({ from, to, op = null, preset = null }) {
     date: preset ? (preset.date > M.ymd() ? M.ymd() : preset.date) : (op?.date ?? M.ymd()),
     panel: null,
     repeat: { every: op?.repeat?.every ?? '', until: op?.repeat?.until ?? '' },
+    warranty: op?.warranty ?? '',
+    photos: [...(op?.photos ?? [])],
   };
+  // id відомий заздалегідь: фото чека пишеться в базу одразу, з прив'язкою до операції
+  const recId = op?.id ?? uid();
   // Повтор задається в операції-правилі; проведений повтор свого не має
   const canRepeat = !preset && !op?.fromRule;
   const autoB = () => M.round2(M.calc(d.a) * rate(src.currency) / rate(dst.currency));
@@ -524,6 +704,8 @@ function openAmount({ from, to, op = null, preset = null }) {
   const lineA = h('button', { type: 'button', class: 'amt-line', onClick: () => { d.active = 'a'; paint(); } });
   const lineB = h('button', { type: 'button', class: 'amt-line second', onClick: () => { d.active = 'b'; if (!d.bOwn) { d.b = M.toExpr(autoB()); d.bOwn = true; } paint(); } });
   const res = h('div', { class: 'amt-res' });
+  // З цілі — видно, скільки там є, і тапом забрати все
+  const avail = h('button', { type: 'button', class: 'amt-avail' });
   const note = h('div', { class: 'amt-note' });
   const tagBar = h('div', { class: 'amt-tags' });
   const lower = h('div', {});
@@ -540,9 +722,15 @@ function openAmount({ from, to, op = null, preset = null }) {
     const expr = d.active === 'a' ? d.a : d.b;
     const v = M.calc(expr);
     res.textContent = M.hasOp(expr) ? (Number.isNaN(v) ? 'помилка' : `= ${M.num(v)}`) : '';
-    note.textContent = [d.tags.map((t) => `#${t}`).join(' '), d.comment, d.repeat.every ? `⟳ ${M.repeatLabel(d.repeat.every)}${d.repeat.until ? ` до ${M.dateTitle(d.repeat.until)}` : ''}` : ''].filter(Boolean).join(' · ');
+    const inGoal = src.kind === 'goal' ? Math.max(0, balance(src, state.ops.filter((o) => o.id !== recId))) : 0;
+    avail.hidden = src.kind !== 'goal';
+    avail.textContent = `у цілі ${M.money(inGoal, src.currency)} · забрати все`;
+    avail.onclick = () => { d.a = M.toExpr(inGoal); d.active = 'a'; d.b = ''; d.bOwn = false; d.bTyped = false; paint(); };
+    note.textContent = [d.tags.map((t) => `#${t}`).join(' '), d.comment, d.repeat.every ? `⟳ ${M.repeatLabel(d.repeat.every)}${d.repeat.until ? ` до ${M.dateTitle(d.repeat.until)}` : ''}` : '',
+      d.warranty ? `гарантія до ${dmy(d.warranty)}` : '', d.photos.length ? `фото: ${d.photos.length}` : ''].filter(Boolean).join(' · ');
     paintTags();
     pad.querySelector('[aria-label="Повторювати"]')?.classList.toggle('on', Boolean(d.repeat.every));
+    pad.querySelector('[aria-label="Деталі"]')?.classList.toggle('on', Boolean(d.warranty || d.photos.length));
   };
   const paintTags = () => {
     const sugg = [...new Set([...d.tags, ...tagsFor(to)])].slice(0, 8);
@@ -589,24 +777,41 @@ function openAmount({ from, to, op = null, preset = null }) {
     const b = valueB();
     if (!(a > 0) || (two && !(b > 0))) { toast('Введи суму'); vibrate([30, 40, 30]); return; }
     const rec = {
-      id: op?.id ?? uid(), from, to, amount: a, date: date || d.date,
+      id: recId, from, to, amount: a, date: date || d.date,
       tags: d.tags, comment: d.comment.trim(), created: op?.created ?? Date.now(),
     };
     if (two) rec.amountTo = b;
+    if (d.warranty) rec.warranty = d.warranty;
+    if (d.photos.length) rec.photos = d.photos;
+    if (op?.ammo) rec.ammo = op.ammo;
+    if (op?.sl) rec.sl = op.sl;
     if (preset) { rec.fromRule = preset.rule.id; rec.ruleDate = preset.date; }
     if (op?.fromRule) { rec.fromRule = op.fromRule; rec.ruleDate = op.ruleDate; }
     if (canRepeat && d.repeat.every) rec.repeat = { every: d.repeat.every, until: d.repeat.until, skip: op?.repeat?.skip ?? [] };
+    if (refuse([rec])) return;
+    const accBefore = src.kind === 'account' ? balance(src) : 0;
+    const goalBefore = dst.kind === 'goal' ? balance(dst) : 0;
     closeSheet();
     await save({ ops: { put: [rec] } });
     const t = opType(rec);
     const sign = t === 'expense' ? '−' : t === 'income' ? '+' : '';
-    const what = `${dst.name}: ${M.money(t === 'income' ? amountIn(rec) : rec.amount, t === 'income' ? dst.currency : src.currency, { sign })}`;
-    toast(op ? 'Операцію змінено' : what, {
+    // Поповнення, яке дотягнуло ціль до суми, — святкуємо
+    const reached = dst.kind === 'goal' && dst.budget > 0 && goalBefore < dst.budget && balance(coinOr(rec.to)) >= dst.budget;
+    if (reached) vibrate([20, 60, 20, 60, 40]);
+    const accNow = src.kind === 'account' ? balance(coinOr(rec.from)) : 0;
+    const minus = src.kind === 'account' && accNow < 0 && accNow < accBefore ? ` · ${src.name} у мінусі: ${M.money(accNow, src.currency, { sign: '−' })}` : '';
+    const what = (reached ? `Ціль «${dst.name}» зібрано! 🎉`
+      : `${dst.name}: ${M.money(t === 'income' ? amountIn(rec) : rec.amount, t === 'income' ? dst.currency : src.currency, { sign })}`) + minus;
+    toast(op ? `Операцію змінено${minus}` : what, {
       label: 'Скасувати',
       run: () => save(op ? { ops: { put: [{ ...op }] } } : { ops: { del: [rec.id] } }),
     });
+    const slk = slKind(rec);
+    if (slk) offerJournal(rec, slk);
   };
   const remove = async () => {
+    // Не можна — екран лишається відкритим, видно, про що мова
+    if (refuse([], [op.id])) return;
     closeSheet();
     await deleteOp(op);
   };
@@ -625,7 +830,7 @@ function openAmount({ from, to, op = null, preset = null }) {
       ['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((k) => key(k, () => digit(k))),
       key(',', () => digit(','), 'Кома'), key('0', () => digit('0')), key(icon('backspace'), back, 'Стерти')),
     h('div', { class: 'pad-ops' },
-      key(icon('comment'), () => showPanel('comment'), 'Коментар'),
+      key(icon('comment'), () => showPanel('comment'), 'Деталі'),
       key(icon('refresh'), () => (canRepeat ? showPanel('repeat') : toast('Повтор задається в першій операції — відкрий її')), 'Повторювати'),
       key('−', () => operator('−'), 'Мінус'), key('%', () => operator('%'), 'Відсоток'),
       key('+', () => operator('+'), 'Плюс'), key('×', () => operator('×'), 'Помножити'),
@@ -657,13 +862,30 @@ function openAmount({ from, to, op = null, preset = null }) {
       return;
     }
     if (kind === 'comment') {
-      const ta = h('textarea', { rows: 3, maxlength: 200, placeholder: 'Наприклад: Екофлоу', class: 'field' }, d.comment);
+      const ta = h('textarea', { rows: 2, maxlength: 200, placeholder: 'Наприклад: Екофлоу', class: 'field' }, d.comment);
+      // Гарантія: дата кінця або швидко — роки від дати покупки
+      const until = h('input', { type: 'date', class: 'field', value: d.warranty, min: d.date, 'aria-label': 'Гарантія до' });
+      const years = (n) => M.addDays(`${Number(d.date.slice(0, 4)) + n}${d.date.slice(4)}`, 0);
+      const quick = h('div', { class: 'chips' }, [[1, '1 рік'], [2, '2 роки'], [3, '3 роки']].map(([n, label]) => h('button', {
+        type: 'button', class: 'chip', onClick: () => { until.value = years(n); },
+      }, label)));
+      const photos = h('div', { class: 'photo-row' });
+      const drawPhotos = () => photos.replaceChildren(
+        ...d.photos.map((id) => photoThumb(id, () => { d.photos = d.photos.filter((x) => x !== id); drawPhotos(); })),
+        photoAdd(async (blob) => {
+          const id = uid();
+          await putFile({ id, blob, created: Date.now(), op: recId });
+          d.photos.push(id);
+          drawPhotos();
+        }));
+      drawPhotos();
       lower.replaceChildren(h('div', { class: 'amt-panel form' },
         h('label', { class: 'flabel' }, 'Коментар'), ta,
+        h('label', { class: 'flabel' }, 'Гарантія до'), h('div', { class: 'warranty-line' }, until, quick),
+        h('p', { class: 'flabel' }, 'Фото чека чи гарантійного талона'), photos,
         h('div', { class: 'btn-grid' }, h('button', {
-          type: 'button', class: 'btn primary', onClick: () => { d.comment = ta.value; hidePanel(); },
+          type: 'button', class: 'btn primary', onClick: () => { d.comment = ta.value; d.warranty = until.value; hidePanel(); },
         }, icon('check'), 'Готово'))));
-      ta.focus();
       return;
     }
     const input = h('input', { type: 'text', maxlength: 40, placeholder: 'Новий тег, напр. подарунки', class: 'field', enterkeyhint: 'done' });
@@ -726,7 +948,7 @@ function openAmount({ from, to, op = null, preset = null }) {
       route,
       op ? h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Видалити', onClick: remove }, icon('trash')) : null,
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Зберегти', onClick: () => store() }, icon('check'))),
-    h('div', { class: 'amt-body' }, lineA, lineB, res, note));
+    h('div', { class: 'amt-body' }, lineA, lineB, res, avail, note));
   lower.replaceChildren(pad, dates);
   sheet(`${src.name} → ${dst.name}`, [screen.firstChild, screen.lastChild, tagBar, lower], { cls: 'screen', bare: true });
   paintRoute();
@@ -758,7 +980,9 @@ function opRow(op) {
   const cur = t === 'income' ? dst.currency : src.currency;
   const sign = t === 'expense' ? '− ' : t === 'income' ? '+ ' : '';
   const every = op.plan ? op.rule.repeat.every : op.repeat?.every;
-  const note = [(op.tags ?? []).map((x) => `#${x}`).join(' '), op.comment, every ? `⟳ ${M.repeatLabel(every)}` : ''].filter(Boolean);
+  const note = [(op.tags ?? []).map((x) => `#${x}`).join(' '), op.comment, every ? `⟳ ${M.repeatLabel(every)}` : '',
+    op.warranty && !op.plan ? `гарантія до ${dmy(op.warranty)}` : '', op.photos?.length && !op.plan ? `фото: ${op.photos.length}` : '',
+    op.plan ? '' : slNote(op)].filter(Boolean);
   const second = op.amountTo != null && t === 'transfer' ? ` → ${M.money(op.amountTo, dst.currency)}` : '';
   // Запланований повтор: тап — провести з правкою суми, свайп вправо — провести як є, вліво — пропустити чи зупинити
   if (op.plan) {
@@ -779,6 +1003,7 @@ function opRow(op) {
 }
 
 async function deleteOp(op) {
+  if (refuse([], [op.id])) return;
   await save({ ops: { del: [op.id] } });
   toast('Операцію видалено', { label: 'Скасувати', run: () => save({ ops: { put: [{ ...op }] } }) });
 }
@@ -871,6 +1096,7 @@ async function confirmPlan(p) {
     tags: [...(p.tags ?? [])], comment: p.comment ?? '', created: Date.now(), fromRule: p.rule.id, ruleDate: p.date,
   };
   if (p.amountTo != null) rec.amountTo = p.amountTo;
+  if (refuse([rec])) return;
   await save({ ops: { put: [rec] } });
   toast(`Проведено: ${coinOr(p.to).name}`, { label: 'Скасувати', run: () => save({ ops: { del: [rec.id] } }) });
 }
@@ -919,33 +1145,95 @@ function coinDayFoot(c, dayOps) {
     h('div', {}, h('b', { class: v > 0 ? 'plus' : v < 0 ? 'minus' : '' }, M.money(v, c.currency, { sign })), h('span', {}, 'зміна')));
 }
 
-function viewFeed() {
-  const ops = [...state.ops, ...planned()].filter((op) => !feedCoin || op.from === feedCoin || op.to === feedCoin).sort(byNewest);
-  if (!ops.length) return h('p', { class: 'empty' }, feedCoin ? 'У цієї монети ще немає операцій' : 'Ще немає операцій — потягни монету на головній');
+const FEED_TYPES = [['all', 'Усі'], ['expense', 'Витрати'], ['income', 'Доходи'], ['transfer', 'Перекази']];
+
+/** Чи підходить операція під пошук: назви монет, теги, коментар, сума. q — уже через searchKey. */
+function opMatches(op, q) {
+  if (!q) return true;
+  const hay = [coinOr(op.from).name, coinOr(op.to).name, ...(op.tags ?? []).map((t) => `#${t}`), op.comment ?? '', String(op.amount)]
+    .map(searchKey).join(' ');
+  return q.split(/\s+/).every((w) => hay.includes(w));
+}
+
+/** Зміна в гривнях від знайдених операцій: доходи плюс, витрати мінус, перекази не рахуються. */
+function opsChange(list) {
+  let v = 0;
+  for (const op of list) {
+    if (op.plan) continue;
+    const t = opType(op);
+    if (t === 'expense') v -= toUah(amountIn(op), coinOr(op.to).currency);
+    else if (t === 'income') v += toUah(op.amount, coinOr(op.from).currency);
+  }
+  return v;
+}
+
+const signedUah = (v) => M.money(v, 'UAH', { sign: v > 0 ? '+ ' : v < 0 ? '− ' : '' });
+
+/** Список днів стрічки під поточні монету, пошук і тип. */
+function feedList() {
+  const q = searchKey(feedQuery);
+  const filtered = Boolean(q) || feedType !== 'all';
+  const ops = [...state.ops, ...planned()]
+    .filter((op) => !feedCoin || op.from === feedCoin || op.to === feedCoin)
+    .filter((op) => feedType === 'all' || opType(op) === feedType)
+    .filter((op) => opMatches(op, q))
+    .sort(byNewest);
+  if (!ops.length) {
+    return [h('p', { class: 'empty' }, filtered ? 'Нічого не знайдено'
+      : feedCoin ? 'У цієї монети ще немає операцій' : 'Ще немає операцій — потягни монету на головній')];
+  }
   const days = [...new Set(ops.map((op) => op.date))];
   const shown = days.slice(0, feedDays);
-  // Залишок на кінець дня: від сьогоднішнього назад віднімаємо зміни пізніших днів
+  // Залишок на кінець дня: від сьогоднішнього відкочуємо зміни пізніших днів — усіх, не лише показаних
   const delta = new Map();
   for (const op of state.ops) delta.set(op.date, (delta.get(op.date) ?? 0) + accDelta(op));
+  const deltaDays = [...delta.keys()].sort().reverse();
   let bal = totalBalance();
-  const later = [...delta.keys()].filter((dt) => dt > shown[0]);
-  for (const dt of later) bal -= delta.get(dt);
+  let i = 0;
+  const balAt = (date) => {
+    while (i < deltaDays.length && deltaDays[i] > date) { bal -= delta.get(deltaDays[i]); i += 1; }
+    return bal;
+  };
   const today = M.ymd();
-  const blocks = [];
+  const out = [];
+  if (filtered) {
+    const real = ops.filter((op) => !op.plan);
+    out.push(h('p', { class: 'feed-found' }, `Знайдено: ${real.length}`, feedType === 'transfer' ? null : h('b', {}, signedUah(opsChange(real)))));
+  }
   for (const date of shown) {
     const dayOps = ops.filter((op) => op.date === date);
-    const { expense, income } = totals(date);
-    const change = income - expense;
-    blocks.push(h('section', { class: 'day' }, h('h2', { class: 'day-title' }, M.dayHead(date, today)),
-      h('div', { class: 'card' },
-        dayOps.map(opRow),
-        feedCoin ? coinDayFoot(coin(feedCoin), dayOps) : h('div', { class: 'day-foot' },
-          h('div', {}, h('b', {}, M.money(Math.round(bal))), h('span', {}, 'на рахунках')),
-          h('div', {}, h('b', { class: change > 0 ? 'plus' : change < 0 ? 'minus' : '' }, M.money(change, 'UAH', { sign: change > 0 ? '+ ' : change < 0 ? '− ' : '' })), h('span', {}, 'зміна'))))));
-    bal -= delta.get(date) ?? 0;
+    let foot;
+    if (feedCoin) foot = coinDayFoot(coin(feedCoin), dayOps);
+    else if (filtered) {
+      // Під пошуком «на рахунках» не про знайдене — лише сума знайденого за день
+      const v = opsChange(dayOps);
+      foot = feedType === 'transfer' ? null : h('div', { class: 'day-foot' }, h('div', {}),
+        h('div', {}, h('b', { class: v > 0 ? 'plus' : v < 0 ? 'minus' : '' }, signedUah(v)), h('span', {}, 'знайдене')));
+    } else {
+      const { expense, income } = totals(date);
+      const change = income - expense;
+      foot = h('div', { class: 'day-foot' },
+        h('div', {}, h('b', {}, M.money(Math.round(balAt(date)))), h('span', {}, 'на рахунках')),
+        h('div', {}, h('b', { class: change > 0 ? 'plus' : change < 0 ? 'minus' : '' }, signedUah(change)), h('span', {}, 'зміна')));
+    }
+    out.push(h('section', { class: 'day' }, h('h2', { class: 'day-title' }, M.dayHead(date, today)),
+      h('div', { class: 'card' }, dayOps.map(opRow), foot)));
   }
-  return h('div', { class: 'page stack feed' }, blocks,
-    days.length > shown.length ? h('button', { type: 'button', class: 'more-btn', onClick: () => { feedDays += 60; render(); } }, 'Показати ще') : null);
+  if (days.length > shown.length) out.push(h('button', { type: 'button', class: 'more-btn', onClick: () => { feedDays += 60; render(); } }, 'Показати ще'));
+  return out;
+}
+
+function viewFeed() {
+  const list = h('div', { class: 'stack feed' }, feedList());
+  let timer = 0;
+  const search = h('input', {
+    type: 'search', class: 'field', value: feedQuery, enterkeyhint: 'search', 'aria-label': 'Пошук у стрічці',
+    placeholder: feedCoin ? 'Пошук: тег, коментар, сума…' : 'Пошук: рахунок, категорія, тег, коментар…',
+    // Список — без перемальовування всього екрана: поле не втрачає фокус і клавіатура не ховається
+    onInput: (e) => { feedQuery = e.target.value; clearTimeout(timer); timer = setTimeout(() => list.replaceChildren(...feedList()), 150); },
+  });
+  const types = feedCoin ? null : chips(FEED_TYPES, feedType, (v) => { feedType = v; list.replaceChildren(...feedList()); });
+  return h('div', { class: 'page stack feed-page' }, h('div', { class: 'feed-tools' }, search, types), list);
 }
 
 // ---------- звіти ----------
@@ -958,7 +1246,7 @@ const firstOpDate = () => state.ops.reduce((m, op) => (op.date < m ? op.date : m
 /** Межі звіту: свій період з фільтра або місяць, що гортається. Дати — рядки «РРРР-ММ-ДД», порівнюються як рядки. */
 function reportRange() {
   if (customPeriod()) return [reportFilter.from || firstOpDate(), reportFilter.to || M.ymd()];
-  return [`${reportMonth}-01`, `${reportMonth}-31`];
+  return periodRange(reportMonth);
 }
 
 const dmy = (date) => `${date.slice(8, 10)}.${date.slice(5, 7)}.${date.slice(0, 4)}`;
@@ -967,7 +1255,7 @@ function shortRange() {
   const [lo, hi] = reportRange();
   return lo.slice(0, 4) === hi.slice(0, 4) ? `${dmy(lo).slice(0, 5)} – ${dmy(hi)}` : `${dmy(lo)} – ${dmy(hi)}`;
 }
-const reportTitle = () => (customPeriod() ? reportRange().map(dmy).join(' – ') : M.monthTitle(reportMonth));
+const reportTitle = () => (customPeriod() ? reportRange().map(dmy).join(' – ') : periodTitle(reportMonth));
 
 /** Операції звіту в гривнях: потрібного типу, у межах періоду, з вибраних рахунків. */
 function reportItems(kind) {
@@ -1085,7 +1373,7 @@ function viewReport() {
     nav,
     total ? donut(parts, total, picked
       ? [h('span', {}, picked.c.name), h('b', {}, M.money(picked.v)), h('span', {}, `${Math.round((picked.v / total) * 100)}%`)]
-      : [h('span', {}, custom ? shortRange() : M.monthTitle(reportMonth)), h('b', {}, M.money(real))])
+      : [h('span', {}, custom ? shortRange() : periodTitle(reportMonth)), h('b', {}, M.money(real))])
       : h('p', { class: 'empty' }, custom ? `За цей період ${what} немає` : `Цього місяця ${what} немає`),
     total ? h('div', { class: 'card' }, parts.map((p) => h('button', {
       type: 'button', class: `rep-row${reportPick === p.c.id ? ' on' : ''}`,
@@ -1179,8 +1467,9 @@ function viewDays() {
 
 // ---------- редагування монети ----------
 
-const NEW_ICON = { account: 'wallet', income: 'banknote', expense: 'shopping-cart', goal: 'piggy-bank' };
+const NEW_ICON = { account: 'wallet', income: 'banknote', expense: 'shopping-cart', goal: 'piggy-bank', debt: 'handshake' };
 const GRID_KINDS = [['expense', 'Витрата'], ['goal', 'Ціль']];
+const ROW_KINDS = [['account', 'Рахунок'], ['debt', 'Борг']];
 
 // Пошук без різниці між великими літерами й видами апострофа
 const searchKey = (s) => s.toLocaleLowerCase('uk').replace(/[’ʼ`]/g, "'").trim();
@@ -1250,13 +1539,28 @@ function editCoin(orig, kind = orig?.kind) {
   const startLabel = kind === 'goal' ? 'Уже відкладено' : 'Залишок зараз';
   const start = amountField(orig ? balance(orig) : 0, startLabel);
   const grid = iconPicker(d);
+  // Борг: напрям і сума зараз, дата повернення, чи входить у «Баланс»
+  const debt = kind === 'debt';
+  const debtNow = orig && debt ? balance(orig) : 0;
+  const dir = { v: debtNow < 0 ? 'owe' : 'owed' };
+  const debtSum = amountField(Math.abs(debtNow), 'Сума боргу зараз');
+  const due = h('input', { type: 'date', class: 'field', value: d.due ?? '', 'aria-label': 'Повернути до' });
+  const counted = h('input', { type: 'checkbox', checked: Boolean(d.inBalance) });
   const store = async () => {
     const rec = { ...d, name: name.value.trim() };
-    if (!rec.name) { toast('Дай назву'); return; }
+    if (!rec.name) { toast(debt ? 'Напиши, хто' : 'Дай назву'); return; }
     rec.budget = Math.max(0, Number(budget.value) || 0);
+    if (debt) {
+      rec.budget = 0;
+      rec.due = due.value || '';
+      rec.inBalance = counted.checked;
+      // Як у рахунку: «скільки зараз» → стартовий залишок, операції не чіпаємо
+      const now = (dir.v === 'owe' ? -1 : 1) * (Number(debtSum.value) || 0);
+      rec.start = M.round2((d.start || 0) + now - debtNow);
+    }
     if (holds) {
       // Залишок задають «скільки зараз»: різницю переносимо в стартовий, операції не чіпаємо
-      const now = Number(start.value) || 0;
+      const now = kind === 'goal' ? Math.max(0, Number(start.value) || 0) : Number(start.value) || 0;
       rec.start = M.round2((d.start || 0) + now - (orig ? balance(orig) : 0));
     }
     closeSheet();
@@ -1270,10 +1574,20 @@ function editCoin(orig, kind = orig?.kind) {
     // Нова монета в сітці витрат: витрата чи ціль — інший тип перемальовує форму
     !orig && (kind === 'expense' || kind === 'goal')
       ? [h('p', { class: 'flabel' }, 'Тип'), chips(GRID_KINDS, kind, (v) => { if (v !== kind) editCoin(null, v); })] : null,
+    !orig && (kind === 'account' || kind === 'debt')
+      ? [h('p', { class: 'flabel' }, 'Тип'), chips(ROW_KINDS, kind, (v) => { if (v !== kind) editCoin(null, v); })] : null,
     kind === 'goal' ? h('p', { class: 'muted small' }, 'Відкладене: гроші з рахунку переносиш сюди перетягуванням. У «Баланс» і у витрати не входять.') : null,
-    h('label', { class: 'flabel' }, 'Назва'), name,
-    kind !== 'expense' || !used ? [h('p', { class: 'flabel' }, 'Валюта'), chips(M.CURRENCIES, d.currency, (v) => { d.currency = v; })] : null,
-    kind !== 'account' ? [h('label', { class: 'flabel' }, budgetLabel), budget] : null,
+    debt ? h('p', { class: 'muted small' }, 'Дав у борг — тягни рахунок на цю монету; позичив чи тобі повертають — тягни її на рахунок. Ні витратою, ні доходом це не рахується.') : null,
+    h('label', { class: 'flabel' }, debt ? 'Хто' : 'Назва'), name,
+    !used ? [h('p', { class: 'flabel' }, 'Валюта'), chips(M.CURRENCIES, d.currency, (v) => { d.currency = v; })]
+      : kind !== 'expense' ? h('p', { class: 'muted small' }, `Валюта: ${d.currency} — змінити не можна, бо вже є операції`) : null,
+    debt ? [
+      h('p', { class: 'flabel' }, 'Зараз'), chips([['owed', 'Мені винні'], ['owe', 'Я винен']], dir.v, (v) => { dir.v = v; }),
+      h('label', { class: 'flabel' }, 'Сума боргу зараз (0 — почнеш з перетягування)'), debtSum,
+      h('label', { class: 'flabel' }, 'Повернути до (не обов’язково)'), due,
+      h('label', { class: 'check-row' }, h('span', {}, 'Враховувати в «Баланс»'), counted),
+    ] : null,
+    kind !== 'account' && !debt ? [h('label', { class: 'flabel' }, budgetLabel), budget] : null,
     holds ? [h('label', { class: 'flabel' }, startLabel), start] : null,
     h('p', { class: 'flabel' }, 'Іконка'), grid,
     h('div', { class: 'btn-grid' },
@@ -1306,6 +1620,24 @@ async function fetchRates(force = false) {
   return true;
 }
 
+function periodCard() {
+  const day = startDay();
+  const select = h('select', {
+    class: 'field', 'aria-label': 'День початку місяця',
+    onChange: async (e) => {
+      await save({ meta: { put: [{ id: 'period', day: Number(e.target.value) }] } }, { redraw: false });
+      reportMonth = currentPeriod();
+      render();
+      toast(Number(e.target.value) === 1 ? 'Місяць — календарний' : `Місяць обліку — з ${e.target.value}-го`);
+    },
+  }, Array.from({ length: 28 }, (_, i) => h('option', { value: String(i + 1), selected: i + 1 === day }, i === 0 ? '1 — календарний місяць' : `${i + 1}-го числа`)));
+  return h('section', { class: 'card set-card' },
+    h('h2', {}, 'Початок місяця'),
+    h('p', { class: 'muted small' }, 'З якого дня рахувати місяць: бюджети, «Витрати», «В планах» і звіт «Загальний». Зручно — з дня зарплати.'),
+    select,
+    day === 1 ? null : h('p', { class: 'muted small' }, `Зараз: ${periodTitle(currentPeriod())}`));
+}
+
 function viewSettings() {
   const m = ratesMeta();
   const rateInput = (cc) => h('input', {
@@ -1323,6 +1655,7 @@ function viewSettings() {
   return h('div', { class: 'page stack' },
     aboutPanel(),
     h('section', { class: 'card set-card' }, h('h2', {}, 'Тема'), theme),
+    periodCard(),
     h('section', { class: 'card set-card' },
       h('h2', {}, 'Курси до гривні'),
       h('div', { class: 'rate-row' }, h('b', {}, '$'), rateInput('USD')),
@@ -1528,11 +1861,550 @@ async function importBackup(f) {
 // ---------- меню й маршрути ----------
 
 const MENU = [
-  ['feed', 'feed', 'Стрічка'],
-  ['days', 'daily', 'Звіт по днях'],
-  ['report', 'pie', 'Загальний'],
-  ['settings', 'gear', 'Налаштування'],
+  ['Огляд', [['feed', 'feed', 'Стрічка'], ['days', 'daily', 'Звіт по днях'], ['report', 'pie', 'Загальний'], ['history', 'chart', 'Історія']]],
+  ['Планування', [['subs', 'refresh', 'Регулярні платежі'], ['warranty', 'shield', 'Гарантії'], ['reconcile', 'scale', 'Звірка залишків']]],
 ];
+
+/** Порожній екран: іконка в колі, заголовок і підказка, що робити. */
+const emptyState = (ico, title, text) => h('div', { class: 'empty-state' },
+  h('span', { class: 'empty-ico' }, icon(ico)), h('b', {}, title), h('p', {}, text));
+
+// ---------- регулярні платежі ----------
+
+// Скільки разів на місяць у середньому: тиждень — 52/12, день — 365/12
+const PER_MONTH = { day: 365 / 12, week: 52 / 12, month: 1, year: 1 / 12 };
+
+/** Наступна дата повтору після сьогодні (або null, якщо правило скінчилось). */
+function nextRepeat(rule) {
+  const today = M.ymd();
+  const last = M.repeatDates(rule.date, rule.repeat.every, rule.repeat.until, today).at(-1);
+  return last && last > today ? last : null;
+}
+
+const activeRule = (op) => Boolean(op.repeat?.every) && (!op.repeat.until || op.repeat.until >= M.ymd());
+
+function viewSubs() {
+  const rules = state.ops.filter((op) => op.repeat?.every).sort((a, b) => b.amount - a.amount);
+  if (!rules.length) {
+    return h('div', { class: 'page' }, emptyState('refresh', 'Регулярних платежів ще немає',
+      'Комуналка, підписки, оренда: відкрий операцію й натисни ⟳ на клавіатурі суми — щомісяця, щотижня чи щороку.'));
+  }
+  const today = M.ymd();
+  const active = rules.filter(activeRule);
+  const stopped = rules.filter((op) => !activeRule(op));
+  // Місячний еквівалент у гривнях: витрати й доходи окремо, перекази не рахуються
+  const monthly = (op) => toUah(op.amount, coinOr(op.from).currency) * PER_MONTH[op.repeat.every];
+  const sumOf = (t) => active.filter((op) => opType(op) === t).reduce((s, op) => s + monthly(op), 0);
+  const outM = sumOf('expense');
+  const inM = sumOf('income');
+  const stop = async (op) => {
+    await save({ ops: { put: [{ ...op, repeat: { ...op.repeat, until: M.addDays(today, -1) } }] } });
+    toast(`Зупинено: ${coinOr(op.to).name}`, { label: 'Скасувати', run: () => save({ ops: { put: [{ ...op }] } }) });
+  };
+  const resume = (op) => save({ ops: { put: [{ ...op, repeat: { ...op.repeat, until: '' } }] } });
+  const soon = (date) => {
+    const n = daysLeft(date);
+    return n === 0 ? 'сьогодні' : n === 1 ? 'завтра' : `через ${n} дн.`;
+  };
+  const row = (op, on) => {
+    const t = opType(op);
+    const src = coinOr(op.from);
+    const dst = coinOr(op.to);
+    const next = on ? nextRepeat(op) : null;
+    const name = [t === 'income' ? src.name : dst.name, op.comment].filter(Boolean).join(' · ');
+    const perMonth = op.repeat.every !== 'month' && t !== 'transfer' ? `≈ ${M.money(Math.round(monthly(op)))}/міс` : '';
+    return h('div', { class: `sub-row${on ? '' : ' off'}` },
+      h('button', { type: 'button', class: 'sub-main', onClick: () => openAmount({ from: op.from, to: op.to, op }) },
+        miniCoin(t === 'income' ? src : dst),
+        h('span', { class: 'sub-text' },
+          h('b', {}, name),
+          h('span', {}, [M.repeatLabel(op.repeat.every), perMonth, on ? '' : `зупинено ${dmy(op.repeat.until)}`].filter(Boolean).join(' · '))),
+        h('span', { class: 'sub-right' },
+          h('span', { class: `sub-sum ${t}` }, M.money(op.amount, src.currency)),
+          next ? h('span', { class: `pill${daysLeft(next) <= 3 ? ' warn' : ''}` }, soon(next)) : null)),
+      h('button', {
+        type: 'button', class: 'icon-btn sub-act', 'aria-label': on ? `Зупинити: ${name}` : `Відновити: ${name}`, title: on ? 'Зупинити' : 'Відновити',
+        onClick: () => (on ? stop(op) : resume(op)),
+      }, icon(on ? 'pause' : 'play')));
+  };
+  return h('div', { class: 'page stack' },
+    h('div', { class: 'card hero' },
+      h('span', { class: 'hero-cap' }, 'Регулярні витрати на місяць'),
+      h('b', { class: 'hero-num' }, `≈ ${M.money(Math.round(outM))}`),
+      h('span', { class: 'hero-sub' }, `за рік ≈ ${M.money(Math.round(outM * 12))} · ${active.length} ${active.length === 1 ? 'платіж' : active.length < 5 ? 'платежі' : 'платежів'}`),
+      inM ? h('span', { class: 'hero-sub plus' }, `регулярні доходи ≈ ${M.money(Math.round(inM))} на місяць`) : null),
+    active.length ? h('div', { class: 'card' }, active.map((op) => row(op, true))) : h('p', { class: 'empty' }, 'Усі регулярні платежі зупинено'),
+    stopped.length ? h('details', { class: 'card fold-card' }, h('summary', {}, `Зупинені (${stopped.length})`), stopped.map((op) => row(op, false))) : null);
+}
+
+// ---------- історія: як міняється з місяця в місяць ----------
+
+// Що показувати: exp / inc / net — підсумки, c:<id> — монета, t:<тег> — тег витрат
+let histKey = 'exp';
+let histPick = null;
+const MONTHS_SHORT = ['січ', 'лют', 'бер', 'кві', 'тра', 'чер', 'лип', 'сер', 'вер', 'жов', 'лис', 'гру'];
+const HIST_N = 12;
+
+/** Ряд для графіка: назва, тип (exp — витратний, можна прогнозувати; inc; net — плюс і мінус) і значення за період. */
+function histSeries(key) {
+  if (key === 'inc') return { name: 'Усі доходи', kind: 'inc', value: (ym) => totals(ym).income };
+  if (key === 'net') return { name: 'Чистий дохід', kind: 'net', value: (ym) => { const t = totals(ym); return t.income - t.expense; } };
+  if (key.startsWith('c:')) {
+    const c = coin(key.slice(2));
+    if (c?.kind === 'income') return { name: c.name, kind: 'inc', value: (ym) => toUah(monthIncome(c, ym), c.currency) };
+    if (c) return { name: c.name, kind: 'exp', value: (ym) => toUah(monthSpent(c, ym), c.currency) };
+  }
+  if (key.startsWith('t:')) {
+    const tag = key.slice(2);
+    return {
+      name: `#${tag}`, kind: 'exp',
+      value: (ym) => state.ops.reduce((s, op) => (opType(op) === 'expense' && op.tags?.includes(tag) && inMonth(op, ym)
+        ? s + toUah(amountIn(op), coinOr(op.to).currency) : s), 0),
+    };
+  }
+  return { name: 'Усі витрати', kind: 'exp', value: (ym) => totals(ym).expense };
+}
+
+/** Вибір ряду: підсумки, витрати, доходи, теги — списком, бо монет і тегів багато. */
+function histSelect() {
+  const opt = (v, label) => h('option', { value: v, selected: v === histKey }, label);
+  const group = (label, items) => (items.length ? h('optgroup', { label }, items) : null);
+  return h('select', {
+    class: 'field', 'aria-label': 'Що показати',
+    onChange: (e) => { histKey = e.target.value; histPick = null; render(); },
+  },
+  group('Підсумки', [opt('exp', 'Усі витрати'), opt('inc', 'Усі доходи'), opt('net', 'Чистий дохід (доходи − витрати)')]),
+  group('Витрати', coinsOf('expense').map((c) => opt(`c:${c.id}`, c.name))),
+  group('Доходи', coinsOf('income').map((c) => opt(`c:${c.id}`, c.name))),
+  group('Теги', allTags().map((t) => opt(`t:${t}`, `#${t}`))));
+}
+
+/** Стовпчик із заокругленим кінцем далі від нуля: y0 — нуль, y1 — значення. */
+function barPath(x, w, y0, y1) {
+  const r = Math.min(4, Math.abs(y1 - y0), w / 2);
+  if (y1 === y0) return '';
+  const up = y1 < y0;
+  const e = up ? y1 + r : y1 - r;
+  return `M${x} ${y0}V${e}Q${x} ${y1} ${x + r} ${y1}H${x + w - r}Q${x + w} ${y1} ${x + w} ${e}V${y0}Z`;
+}
+
+function viewHistory() {
+  const s = histSeries(histKey);
+  const cur = currentPeriod();
+  const keys = Array.from({ length: HIST_N }, (_, i) => M.addMonths(cur, i - HIST_N + 1));
+  const vals = keys.map((k) => s.value(k));
+  // Прогноз на поточний період — лише для витрат: темп «скільки вже» ÷ «яка частка минула»
+  const el = periodElapsed(cur);
+  const fc = s.kind === 'exp' && el > 0 && el < 1 && vals.at(-1) > 0 ? vals.at(-1) / el : null;
+  // Середнє — по повних періодах, відколи є операції (місяці до першої операції — не нулі, а «ще не було»)
+  const firstOp = state.ops.reduce((m, op) => (op.date < m ? op.date : m), '9999');
+  const since = firstOp === '9999' ? cur : periodOf(firstOp);
+  const full = keys.slice(0, -1).map((k, i) => [k, vals[i]]).filter(([k]) => k >= since);
+  const avg = full.length ? full.reduce((a, [, v]) => a + v, 0) / full.length : null;
+  const pick = histPick && keys.includes(histPick) ? histPick : cur;
+
+  // Геометрія: viewBox, ширина тягнеться на всю картку
+  const W = 360;
+  const H = 190;
+  const top = 20;
+  const bottom = 22;
+  const hi = Math.max(0, ...vals, fc ?? 0, avg ?? 0);
+  const lo = Math.min(0, ...vals);
+  const span = hi - lo || 1;
+  const y = (v) => top + ((hi - v) / span) * (H - top - bottom);
+  const slot = W / HIST_N;
+  const bw = Math.min(22, slot - 6);
+  const y0 = y(0);
+  const fill = (v) => (s.kind === 'net' ? (v >= 0 ? 'var(--plus)' : 'var(--minus)') : 'var(--s1)');
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const sv = (tag, attrs, ...kids) => {
+    const n = document.createElementNS(svgNS, tag);
+    for (const [k, v] of Object.entries(attrs)) if (v != null) n.setAttribute(k, v);
+    n.append(...kids.flat().filter(Boolean));
+    return n;
+  };
+  const svg = sv('svg', { viewBox: `0 0 ${W} ${H}`, class: 'hist-svg', role: 'img', 'aria-label': `${s.name} за ${HIST_N} місяців` },
+    sv('line', { x1: 0, x2: W, y1: y0, y2: y0, class: 'hist-zero' }),
+    keys.map((k, i) => {
+      const x = i * slot + (slot - bw) / 2;
+      const v = vals[i];
+      const now = k === cur;
+      const label = `${periodTitle(k)}: ${M.money(Math.round(v))}`;
+      return sv('g', { class: `hist-col${k === pick ? ' on' : ''}${now ? ' now' : ''}` },
+        now && fc ? sv('path', { d: barPath(x, bw, y0, y(fc)), class: 'hist-fc' }) : null,
+        sv('path', { d: barPath(x, bw, y0, y(v)), fill: fill(v), class: 'hist-bar' }),
+        sv('text', { x: x + bw / 2, y: H - 6, class: 'hist-x' }, MONTHS_SHORT[Number(k.slice(5, 7)) - 1]),
+        // Зона натискання — уся колонка, не лише стовпчик
+        sv('rect', { x: i * slot, y: 0, width: slot, height: H, class: 'hist-hit', tabindex: '0', 'aria-label': label },
+          sv('title', {}, label)));
+    }),
+    avg != null && avg !== 0 ? [
+      sv('line', { x1: 0, x2: W, y1: y(avg), y2: y(avg), class: 'hist-avg' }),
+      sv('text', { x: 2, y: y(avg) - 4, class: 'hist-avg-t' }, 'середнє'),
+    ] : null);
+  const choose = (e) => {
+    const g = e.target.closest?.('.hist-col');
+    if (!g) return;
+    histPick = keys[[...svg.querySelectorAll('.hist-col')].indexOf(g)];
+    render();
+  };
+  svg.addEventListener('click', choose);
+  svg.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(e); } });
+
+  const pv = vals[keys.indexOf(pick)];
+  const fmt = (v) => (s.kind === 'net' ? signedUah(Math.round(v)) : M.money(Math.round(v)));
+  const readout = h('div', { class: 'hist-read' },
+    h('span', {}, `${periodTitle(pick)}${pick === cur ? ' · поки що' : ''}`),
+    h('b', { class: s.kind === 'net' ? (pv > 0 ? 'plus' : pv < 0 ? 'minus' : '') : '' }, fmt(pv)),
+    pick === cur && fc ? h('span', {}, `прогноз на кінець місяця ≈ ${M.money(Math.round(fc))}`) : null);
+  const tile = (label, v, sub = null) => h('div', {}, h('span', {}, label), h('b', {}, v), sub ? h('span', {}, sub) : null);
+  const sum12 = vals.reduce((a, v) => a + v, 0);
+  const stats = h('div', { class: 'card sub-total' },
+    tile('Середнє за місяць', avg == null ? '—' : fmt(avg), full.length ? `за ${full.length} повн. міс.` : 'ще немає повного місяця'),
+    tile(`Разом за ${HIST_N} міс.`, fmt(sum12)));
+  const table = h('details', { class: 'card fold-card' }, h('summary', {}, 'Таблицею'),
+    h('table', { class: 'hist-table' }, h('tbody', {}, [...keys].reverse().map((k) => h('tr', {},
+      h('td', {}, periodTitle(k)), h('td', {}, fmt(vals[keys.indexOf(k)])))))));
+  return h('div', { class: 'page stack' },
+    histSelect(),
+    h('div', { class: 'card hist-card' }, readout, svg,
+      h('p', { class: 'hist-key muted small' },
+        fc ? h('span', { class: 'hist-key-fc' }, 'пунктир — прогноз') : null,
+        avg != null ? h('span', { class: 'hist-key-avg' }, 'лінія — середнє') : null)),
+    stats, table);
+}
+
+// ---------- гарантії й фото чеків ----------
+
+const WARRANTY_SOON = 30;
+const daysLeft = (date) => Math.round((M.parseYmd(date) - M.parseYmd(M.ymd())) / 864e5);
+/** Операції з гарантією: найближчий кінець першим. */
+const warrantyOps = () => state.ops.filter((op) => op.warranty).sort((a, b) => a.warranty.localeCompare(b.warranty));
+const opName = (op) => op.comment || coinOr(op.to).name;
+
+/** Фото з телефона: зменшене до 1600 px по довшій стороні, JPEG — щоб база не розросталась. */
+async function shrinkPhoto(file) {
+  const bmp = await createImageBitmap(file);
+  const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bmp.width * k);
+  canvas.height = Math.round(bmp.height * k);
+  canvas.getContext('2d').drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  bmp.close();
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.82));
+}
+
+/** Кнопка «+ фото»: камера чи галерея — вибирає телефон. */
+function photoAdd(onBlob) {
+  const input = h('input', {
+    type: 'file', accept: 'image/*', hidden: true,
+    onChange: async () => {
+      const file = input.files[0];
+      input.value = '';
+      if (!file) return;
+      try { await onBlob(await shrinkPhoto(file)); } catch { toast('Не вдалося прочитати фото'); }
+    },
+  });
+  return h('label', { class: 'photo-add', 'aria-label': 'Додати фото' }, icon('camera'), input);
+}
+
+/** Мініатюра фото: тап — на весь екран, ✕ — прибрати з операції. Фото з іншого телефона тут немає. */
+function photoThumb(id, onRemove = null) {
+  const box = h('span', { class: 'photo-thumb' });
+  getFile(id).then((f) => {
+    if (!f) { box.classList.add('missing'); box.append(h('span', {}, 'на іншому телефоні')); return; }
+    const url = URL.createObjectURL(f.blob);
+    box.prepend(h('button', { type: 'button', class: 'photo-open', 'aria-label': 'Відкрити фото', onClick: () => showPhoto(url) },
+      h('img', { src: url, alt: '' })));
+  });
+  if (onRemove) box.append(h('button', { type: 'button', class: 'photo-x', 'aria-label': 'Прибрати фото', onClick: onRemove }, icon('close')));
+  return box;
+}
+
+/** Перегляд фото поверх усього: не шторка, щоб не закрити екран суми під ним. */
+function showPhoto(url) {
+  const box = h('div', { class: 'photo-view', role: 'dialog', 'aria-label': 'Фото', onClick: () => box.remove() },
+    h('img', { src: url, alt: 'Фото чека' }));
+  document.body.append(box);
+}
+
+function viewWarranty() {
+  const list = warrantyOps();
+  if (!list.length) {
+    return h('div', { class: 'page' }, emptyState('shield', 'Покупок з гарантією ще немає',
+      'На екрані суми натисни 💬 «Деталі»: там дата «Гарантія до» і фото чека — не доведеться шукати папірець.'));
+  }
+  const row = (op) => {
+    const left = daysLeft(op.warranty);
+    const src = coinOr(op.from);
+    // Скільки гарантійного строку вже минуло — смужкою: зелена, за місяць до кінця помаранчева, скінчилась — сіра
+    const total = Math.max(1, Math.round((M.parseYmd(op.warranty) - M.parseYmd(op.date)) / 864e5));
+    const used = Math.min(1, Math.max(0, (total - left) / total));
+    const st = left < 0 ? 'over' : left <= WARRANTY_SOON ? 'soon' : 'ok';
+    const pill = left < 0 ? 'скінчилась' : left === 0 ? 'останній день' : left < 60 ? `ще ${left} дн.` : `ще ${Math.round(left / 30.4)} міс.`;
+    return h('div', { class: `war-row ${st}` },
+      h('button', { type: 'button', class: 'sub-main', onClick: () => openAmount({ from: op.from, to: op.to, op }) },
+        miniCoin(coinOr(op.to)),
+        h('span', { class: 'sub-text' },
+          h('b', {}, opName(op)),
+          h('span', {}, `${dmy(op.date)} → ${dmy(op.warranty)}`)),
+        h('span', { class: 'sub-right' },
+          h('span', { class: 'sub-sum' }, M.money(op.amount, src.currency)),
+          h('span', { class: `pill ${st === 'ok' ? 'ok' : st === 'soon' ? 'warn' : ''}` }, pill))),
+      h('div', { class: 'war-bar', role: 'presentation', style: { '--p': `${Math.round(used * 100)}%` } }, h('span')),
+      op.photos?.length ? h('div', { class: 'photo-row' }, op.photos.map((id) => photoThumb(id))) : null);
+  };
+  const active = list.filter((op) => daysLeft(op.warranty) >= 0);
+  const over = list.filter((op) => daysLeft(op.warranty) < 0).reverse();
+  return h('div', { class: 'page stack' },
+    active.length ? h('div', { class: 'card' }, active.map(row)) : h('p', { class: 'empty' }, 'Діючих гарантій немає'),
+    over.length ? h('details', { class: 'card fold-card' }, h('summary', {}, `Скінчились (${over.length})`), over.map(row)) : null,
+    h('p', { class: 'foot-note' }, icon('camera'), 'Фото чеків зберігаються лише на цьому телефоні — у Google Диск і резервну копію вони не йдуть.'));
+}
+
+// ---------- покупки для Стрілецького журналу ----------
+
+// Тег витрати → що записати в журнал: патрони на склад, тюнінг ствола, екіпірування
+const SL_TAGS = [
+  ['ammo', ['патрони', 'набої']],
+  ['mod', ['тюнінг', 'тюнинг']],
+  ['gear', ['екіпірування', 'спорядження']],
+];
+// Категорії екіпірування — ті самі ключі, що в журналі
+const GEAR_KINDS = [['armor', 'Бронезахист'], ['carry', 'Розвантаження й підсумки'], ['clothes', 'Одяг і форма'], ['devices', 'Прилади'], ['other', 'Інше']];
+
+/** Що ця витрата для журналу: вид за тегом, або null — не витрата, уже записано чи відмовились. op.ammo — з 0.2.6. */
+function slKind(op) {
+  if (opType(op) !== 'expense' || op.sl || op.ammo) return null;
+  const tags = (op.tags ?? []).map((t) => t.toLowerCase());
+  return SL_TAGS.find(([, names]) => names.some((n) => tags.includes(n)))?.[0] ?? null;
+}
+
+const slNote = (op) => op.sl?.text ?? (op.ammo?.qty ? `на склад: ${op.ammo.qty} шт` : '');
+
+/** Чипи вибору однієї позиції групами: sel.id — вибране. */
+function choiceGroups(groups, sel) {
+  const btns = [];
+  return groups.map(([cap, items]) => [cap ? h('p', { class: 'flabel' }, cap) : null, h('div', { class: 'chips' }, items.map(([id, label]) => {
+    const b = h('button', {
+      type: 'button', class: `chip${id === sel.id ? ' on' : ''}`,
+      onClick: () => { sel.id = id; for (const x of btns) x.classList.toggle('on', x === b); },
+    }, label);
+    btns.push(b);
+    return b;
+  }))]);
+}
+
+const nameField = (value, placeholder) => h('input', { type: 'text', maxlength: 80, class: 'field', value, placeholder, 'aria-label': 'Назва' });
+const gunLabel = (w) => `${w.name}${w.caliber ? ` · ${w.caliber}` : ''}`;
+const byName = (a, b) => (a.name ?? '').localeCompare(b.name ?? '', 'uk');
+
+/** Патрони: який і скільки — рух «купівля» на склад. */
+function ammoSpec({ j, rec, uah }) {
+  if (!j.cartridges.length) return { empty: 'У журналі ще немає жодного патрона. Додай його там, а потім відкрий цю покупку й збережи ще раз.' };
+  const sel = { id: j.cartridges.length === 1 ? j.cartridges[0].id : null };
+  const qty = h('input', { type: 'number', inputmode: 'numeric', min: '1', step: '1', class: 'field', placeholder: 'Скільки штук', 'aria-label': 'Кількість, шт' });
+  const each = h('p', { class: 'muted small' }, `Сума покупки: ${M.money(uah)}`);
+  const showEach = () => {
+    const n = Number(qty.value);
+    each.textContent = n > 0 ? `${M.money(uah)} — це ${M.money(M.round2(uah / n))} за штуку` : `Сума покупки: ${M.money(uah)}`;
+  };
+  qty.addEventListener('input', showEach);
+  // Чипи — типові пачки, як у журналі
+  const quick = h('div', { class: 'chips' }, [20, 50, 100, 200, 500].map((n) => h('button', {
+    type: 'button', class: 'chip', onClick: () => { qty.value = String(n); showEach(); },
+  }, String(n))));
+  // Групами за калібром, найбільший залишок — першим
+  const byCal = new Map();
+  for (const c of [...j.cartridges].sort((a, b) => b.stock - a.stock)) byCal.set(c.caliber || 'Інші', [...(byCal.get(c.caliber || 'Інші') ?? []), c]);
+  return {
+    title: 'Патрони на склад', ok: 'На склад',
+    intro: 'Покупка з тегом #патрони — записати її на склад Стрілецького журналу?',
+    body: [choiceGroups([...byCal].map(([cal, cs]) => [cal, cs.map((c) => [c.id, `${c.name} · ${c.stock} шт`])]), sel),
+      h('label', { class: 'flabel' }, 'Скільки штук'), qty, quick, each],
+    async store() {
+      const c = j.cartridges.find((x) => x.id === sel.id);
+      const n = Math.round(Number(qty.value));
+      if (!c) { toast('Вибери патрон'); return null; }
+      if (!(n > 0)) { toast('Скільки штук?'); qty.focus(); return null; }
+      const mv = { id: uid(), kind: 'buy', date: rec.date, cartridgeId: c.id, caliber: c.caliber, qty: n, price: uah, note: rec.comment || 'Марнотрат' };
+      await addRecord('movements', mv);
+      return { sl: { kind: 'ammo', id: mv.id, text: `на склад: ${n} шт` }, text: `+${n} шт · ${c.name} — на складі`, undo: () => removeRecord('movements', mv.id) };
+    },
+  };
+}
+
+/** Тюнінг: до якого ствола і що — рядок у «Вкладено в ствол». */
+function modSpec({ j, rec, uah }) {
+  if (!j.weapons.length) return { empty: 'У журналі ще немає жодного ствола. Додай його там, а потім відкрий цю покупку й збережи ще раз.' };
+  const guns = [...j.weapons].sort(byName);
+  const sel = { id: guns.length === 1 ? guns[0].id : null };
+  const name = nameField(rec.comment, 'Спуск, цівка, ДТК, приклад…');
+  return {
+    title: 'Тюнінг у журнал', ok: 'Записати',
+    intro: `Покупка з тегом #тюнінг на ${M.money(uah)} — до якого ствола записати?`,
+    body: [choiceGroups([['Ствол', guns.map((w) => [w.id, gunLabel(w)])]], sel), h('label', { class: 'flabel' }, 'Що саме'), name],
+    async store() {
+      const w = guns.find((x) => x.id === sel.id);
+      const title = name.value.trim();
+      if (!w) { toast('Вибери ствол'); return null; }
+      if (!title) { toast('Напиши, що саме'); name.focus(); return null; }
+      const mod = { id: uid(), created: Date.now(), name: title, price: uah, date: rec.date, note: 'Марнотрат' };
+      if (!(await patchRecord('weapons', w.id, (old) => ({ ...old, mods: [...(old.mods ?? []), mod] })))) { toast('Ствол уже видалено з журналу'); return null; }
+      return {
+        sl: { kind: 'mod', id: mod.id, gun: w.id, text: `тюнінг: ${w.name}` }, text: `${title} → ${w.name}`,
+        undo: () => patchRecord('weapons', w.id, (old) => ({ ...old, mods: (old.mods ?? []).filter((m) => m.id !== mod.id) })),
+      };
+    },
+  };
+}
+
+/** Екіпірування: категорія й назва — новий запис у журналі. */
+function gearSpec({ rec, uah }) {
+  const sel = { id: null };
+  const name = nameField(rec.comment, 'Плитоноска, шолом, підсумок…');
+  return {
+    title: 'Екіпірування в журнал', ok: 'Записати',
+    intro: `Покупка з тегом #екіпірування на ${M.money(uah)} — записати її в Стрілецький журнал?`,
+    body: [choiceGroups([['Категорія', GEAR_KINDS]], sel), h('label', { class: 'flabel' }, 'Що саме'), name],
+    async store() {
+      const title = name.value.trim();
+      if (!sel.id) { toast('Вибери категорію'); return null; }
+      if (!title) { toast('Напиши, що саме'); name.focus(); return null; }
+      const g = { id: uid(), name: title, kind: sel.id, price: uah, date: rec.date, note: 'Марнотрат' };
+      await addRecord('gear', g);
+      return { sl: { kind: 'gear', id: g.id, text: `екіпірування: ${title}` }, text: `${title} — в екіпіруванні`, undo: () => removeRecord('gear', g.id) };
+    },
+  };
+}
+
+const SL_SPECS = { ammo: ammoSpec, mod: modSpec, gear: gearSpec };
+const SL_TITLES = { ammo: 'Патрони на склад', mod: 'Тюнінг у журнал', gear: 'Екіпірування в журнал' };
+
+/** Після покупки з тегом: шторка запису в журнал. «Не треба» запам'ятовується, «Скасувати» прибирає запис і з журналу. */
+async function offerJournal(rec, kind) {
+  if (!(await slAvailable())) return;
+  let j;
+  try { j = await readJournal(); } catch { return; }
+  // Екран суми ще закривається через history.back — нова шторка має відкритись після нього, інакше він її й закриє
+  if (history.state?.sheet) await new Promise((r) => { addEventListener('popstate', r, { once: true }); setTimeout(r, 600); });
+  const latest = () => state.ops.find((o) => o.id === rec.id);
+  const mark = async (sl) => {
+    const cur = latest();
+    if (cur) await save({ ops: { put: [{ ...cur, sl }] } });
+  };
+  const unmark = async () => {
+    const o = latest();
+    if (o) { const { sl, ammo, ...rest } = o; await save({ ops: { put: [rest] } }); }
+  };
+  const uah = M.round2(toUah(rec.amount, coinOr(rec.from).currency));
+  const spec = SL_SPECS[kind]({ j, rec, uah });
+  if (spec.empty) {
+    const close = sheet(SL_TITLES[kind], h('div', { class: 'form' },
+      h('p', {}, spec.empty),
+      h('div', { class: 'btn-grid' },
+        h('a', { class: 'btn', href: '../shooting-log/' }, 'Відкрити журнал'),
+        h('button', { type: 'button', class: 'btn primary', onClick: () => close() }, 'Зрозуміло'))));
+    return;
+  }
+  const store = async () => {
+    let res;
+    try { res = await spec.store(); } catch (err) { toast(`Не вдалося записати: ${err.message}`); return; }
+    if (!res) return;
+    close();
+    await mark(res.sl);
+    toast(res.text, { label: 'Скасувати', run: async () => { await res.undo(); await unmark(); } });
+  };
+  const close = sheet(spec.title, h('div', { class: 'form' },
+    h('p', { class: 'muted small' }, spec.intro),
+    spec.body,
+    h('div', { class: 'btn-grid' },
+      h('button', { type: 'button', class: 'btn', onClick: async () => { close(); await mark({ skip: true }); } }, 'Не треба'),
+      h('button', { type: 'button', class: 'btn primary', onClick: store }, icon('check'), spec.ok))));
+}
+
+// ---------- звірка залишків ----------
+
+/** Монета «Не пам'ятаю» потрібного типу: знайти чи створити (витрата — недостача, дохід — надлишок). */
+function lostCoin(kind, extra) {
+  const found = state.coins.find((c) => c.kind === kind && c.lost && !c.archived);
+  if (found) return { coin: found, created: null };
+  const coin = {
+    id: uid(), kind, name: 'Не пам’ятаю', icon: 'circle-help', currency: 'UAH', budget: 0, start: 0,
+    order: Date.now(), archived: false, lost: true,
+  };
+  extra.push(coin);
+  return { coin, created: coin };
+}
+
+function viewReconcile() {
+  const accs = coinsOf('account');
+  if (!accs.length) return h('div', { class: 'page' }, emptyState('scale', 'Рахунків немає', 'Додай рахунок на головній — тоді буде що звіряти.'));
+  const fields = accs.map((c) => h('input', {
+    type: 'number', inputmode: 'decimal', step: '0.01', class: 'field', value: String(M.round2(balance(c))), 'aria-label': `Насправді: ${c.name}`,
+  }));
+  const diffs = accs.map(() => h('span', { class: 'rec-diff' }));
+  const runText = h('span', {});
+  const runBtn = h('button', { type: 'button', class: 'btn primary', onClick: () => run() }, icon('check'), runText);
+  const diffOf = (c, i) => {
+    const real = Number(fields[i].value);
+    return fields[i].value === '' || !Number.isFinite(real) ? 0 : M.round2(real - balance(c));
+  };
+  // Різниця видна одразу, поки вписуєш: плюс — знайшлось більше, мінус — недостача
+  const paintDiffs = () => {
+    let n = 0;
+    accs.forEach((c, i) => {
+      const v = diffOf(c, i);
+      const on = Math.abs(v) >= 0.01;
+      if (on) n += 1;
+      diffs[i].textContent = on ? M.money(v, c.currency, { sign: v > 0 ? '+ ' : '− ' }) : 'збігається';
+      diffs[i].className = `rec-diff ${on ? (v > 0 ? 'plus' : 'minus') : ''}`;
+    });
+    runBtn.disabled = !n;
+    runText.textContent = n ? `Записати різницю (${n})` : 'Усе збігається';
+  };
+  for (const f of fields) {
+    f.addEventListener('input', paintDiffs);
+    f.addEventListener('focus', () => f.select());
+  }
+  const run = async () => {
+    const today = M.ymd();
+    const newCoins = [];
+    const ops = [];
+    accs.forEach((c, i) => {
+      const diff = diffOf(c, i);
+      if (Math.abs(diff) < 0.01) return;
+      const base = { id: uid(), date: today, tags: [], comment: 'Звірка залишків', created: Date.now() };
+      if (diff < 0) {
+        // Недостача: витрата з рахунку на «Не пам'ятаю»; рахунок у валюті — друга сума в гривнях
+        const { coin } = lostCoin('expense', newCoins);
+        const op = { ...base, from: c.id, to: coin.id, amount: -diff };
+        if (c.currency !== coin.currency) op.amountTo = M.round2(toUah(-diff, c.currency));
+        ops.push(op);
+      } else {
+        // Надлишок: дохід «Не пам'ятаю» на рахунок
+        const { coin } = lostCoin('income', newCoins);
+        const op = { ...base, from: coin.id, to: c.id, amount: c.currency === coin.currency ? diff : M.round2(toUah(diff, c.currency)) };
+        if (c.currency !== coin.currency) op.amountTo = diff;
+        ops.push(op);
+      }
+    });
+    if (!ops.length) { toast('Усе збігається — нічого записувати'); return; }
+    await save({ coins: { put: newCoins }, ops: { put: ops } });
+    toast(`Записано різниць: ${ops.length}`, {
+      label: 'Скасувати', run: () => save({ ops: { del: ops.map((o) => o.id) }, coins: { del: newCoins.map((c) => c.id) } }),
+    });
+  };
+  paintDiffs();
+  return h('div', { class: 'page stack' },
+    h('div', { class: 'card hero' },
+      h('span', { class: 'hero-cap' }, 'Давно не вносив витрати?'),
+      h('span', { class: 'hero-sub' }, 'Впиши, скільки зараз насправді на кожному рахунку. Різниця запишеться однією операцією: недостача — витратою «Не пам’ятаю», надлишок — доходом.')),
+    h('div', { class: 'card' }, accs.map((c, i) => h('label', { class: 'rec-row' },
+      h('span', { class: 'rec-name' }, miniCoin(c), h('span', {}, h('b', {}, c.name), h('span', { class: 'muted small' }, `в обліку ${M.money(balance(c), c.currency)}`))),
+      h('span', { class: 'rec-in' }, fields[i], diffs[i])))),
+    runBtn);
+}
 
 function openMenu() {
   // Пункт меню займає запис шторки в історії: «Назад» з екрана веде на головну, а не в закрите меню.
@@ -1542,9 +2414,28 @@ function openMenu() {
     history.replaceState(null, '', `#${key}`);
     route();
   };
+  const here = location.hash.slice(1).split('/')[0];
+  // Лічильник біля пункту: що чекає уваги (помаранчевий) чи просто скільки є
+  const badge = (key) => {
+    if (key === 'feed') { const n = dueCount(); return n ? [n, 'warn'] : null; }
+    if (key === 'subs') { const n = state.ops.filter(activeRule).length; return n ? [n, ''] : null; }
+    if (key === 'warranty') {
+      const n = warrantyOps().filter((op) => daysLeft(op.warranty) >= 0 && daysLeft(op.warranty) <= WARRANTY_SOON).length;
+      return n ? [n, 'warn'] : null;
+    }
+    return null;
+  };
+  const item = ([key, ico, label]) => {
+    const b = badge(key);
+    return h('button', { type: 'button', class: `menu-item${here === key ? ' on' : ''}`, onClick: () => pick(key) },
+      icon(ico), h('span', { class: 'menu-label' }, label), b ? h('span', { class: `menu-badge ${b[1]}` }, String(b[0])) : null);
+  };
   const close = sheet('Меню', h('nav', { class: 'menu' },
-    h('div', { class: 'menu-brand' }, 'Марнотрат'),
-    MENU.map(([key, ico, label]) => h('button', { type: 'button', class: 'menu-item', onClick: () => pick(key) }, icon(ico), label))),
+    h('div', { class: 'menu-head' },
+      h('img', { class: 'menu-logo', src: './icons/icon-192.png', alt: '', width: 44, height: 44 }),
+      h('span', {}, h('b', {}, 'Марнотрат'), h('span', {}, `на рахунках ${M.money(Math.round(totalBalance()))}`))),
+    MENU.map(([title, items]) => h('div', { class: 'menu-group' }, h('p', { class: 'menu-cap' }, title), items.map(item))),
+    h('div', { class: 'menu-foot' }, item(['settings', 'gear', 'Налаштування']), h('p', { class: 'menu-ver' }, `версія ${self.APP_VERSION}`))),
   { cls: 'drawer', bare: true });
 }
 
@@ -1568,6 +2459,10 @@ const VIEWS = {
   report: { title: 'Загальний', render: viewReport },
   days: { title: 'Звіт по днях', render: viewDays },
   settings: { title: 'Налаштування', render: viewSettings },
+  subs: { title: 'Регулярні платежі', render: viewSubs },
+  history: { title: 'Історія', render: viewHistory },
+  warranty: { title: 'Гарантії', render: viewWarranty },
+  reconcile: { title: 'Звірка залишків', render: viewReconcile },
 };
 
 function topbar() {
@@ -1633,7 +2528,7 @@ function route() {
   view = next;
   if (view === 'feed') {
     feedCoin = arg ?? null;
-    if (changed) feedDays = 60;
+    if (changed) { feedDays = 60; feedQuery = ''; feedType = 'all'; }
   }
   render();
   if (changed) scrollTo(0, 0);
@@ -1679,6 +2574,9 @@ async function init() {
   registerWorker();
   try {
     Object.assign(state, await loadAll());
+    reportMonth = currentPeriod();
+    // Фото скасованих і видалених операцій — геть; тихо, старт не чекає
+    dropFilesExcept(new Set(state.ops.flatMap((op) => op.photos ?? []))).catch(() => {});
     if (!state.meta.some((m) => m.id === 'seeded')) {
       await save({ coins: { put: M.seedCoins(uid) }, meta: { put: [{ id: 'seeded', at: M.ymd() }] } }, { redraw: false });
     }
