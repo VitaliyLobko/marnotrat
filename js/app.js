@@ -11,6 +11,9 @@ let view = 'main';
 // Стрічка однієї монети (тап по монеті) — її id; інакше null
 let feedCoin = null;
 let feedDays = 60;
+// Пошук і тип у стрічці: живуть, поки застосунок відкритий
+let feedQuery = '';
+let feedType = 'all';
 let reportKind = 'expense';
 // Період звіту — ключ «РРРР-ММ» місяця, у якому він починається (див. periodOf); стан ще не завантажено — календарний
 let reportMonth = M.monthOf(M.ymd());
@@ -961,33 +964,95 @@ function coinDayFoot(c, dayOps) {
     h('div', {}, h('b', { class: v > 0 ? 'plus' : v < 0 ? 'minus' : '' }, M.money(v, c.currency, { sign })), h('span', {}, 'зміна')));
 }
 
-function viewFeed() {
-  const ops = [...state.ops, ...planned()].filter((op) => !feedCoin || op.from === feedCoin || op.to === feedCoin).sort(byNewest);
-  if (!ops.length) return h('p', { class: 'empty' }, feedCoin ? 'У цієї монети ще немає операцій' : 'Ще немає операцій — потягни монету на головній');
+const FEED_TYPES = [['all', 'Усі'], ['expense', 'Витрати'], ['income', 'Доходи'], ['transfer', 'Перекази']];
+
+/** Чи підходить операція під пошук: назви монет, теги, коментар, сума. q — уже через searchKey. */
+function opMatches(op, q) {
+  if (!q) return true;
+  const hay = [coinOr(op.from).name, coinOr(op.to).name, ...(op.tags ?? []).map((t) => `#${t}`), op.comment ?? '', String(op.amount)]
+    .map(searchKey).join(' ');
+  return q.split(/\s+/).every((w) => hay.includes(w));
+}
+
+/** Зміна в гривнях від знайдених операцій: доходи плюс, витрати мінус, перекази не рахуються. */
+function opsChange(list) {
+  let v = 0;
+  for (const op of list) {
+    if (op.plan) continue;
+    const t = opType(op);
+    if (t === 'expense') v -= toUah(amountIn(op), coinOr(op.to).currency);
+    else if (t === 'income') v += toUah(op.amount, coinOr(op.from).currency);
+  }
+  return v;
+}
+
+const signedUah = (v) => M.money(v, 'UAH', { sign: v > 0 ? '+ ' : v < 0 ? '− ' : '' });
+
+/** Список днів стрічки під поточні монету, пошук і тип. */
+function feedList() {
+  const q = searchKey(feedQuery);
+  const filtered = Boolean(q) || feedType !== 'all';
+  const ops = [...state.ops, ...planned()]
+    .filter((op) => !feedCoin || op.from === feedCoin || op.to === feedCoin)
+    .filter((op) => feedType === 'all' || opType(op) === feedType)
+    .filter((op) => opMatches(op, q))
+    .sort(byNewest);
+  if (!ops.length) {
+    return [h('p', { class: 'empty' }, filtered ? 'Нічого не знайдено'
+      : feedCoin ? 'У цієї монети ще немає операцій' : 'Ще немає операцій — потягни монету на головній')];
+  }
   const days = [...new Set(ops.map((op) => op.date))];
   const shown = days.slice(0, feedDays);
-  // Залишок на кінець дня: від сьогоднішнього назад віднімаємо зміни пізніших днів
+  // Залишок на кінець дня: від сьогоднішнього відкочуємо зміни пізніших днів — усіх, не лише показаних
   const delta = new Map();
   for (const op of state.ops) delta.set(op.date, (delta.get(op.date) ?? 0) + accDelta(op));
+  const deltaDays = [...delta.keys()].sort().reverse();
   let bal = totalBalance();
-  const later = [...delta.keys()].filter((dt) => dt > shown[0]);
-  for (const dt of later) bal -= delta.get(dt);
+  let i = 0;
+  const balAt = (date) => {
+    while (i < deltaDays.length && deltaDays[i] > date) { bal -= delta.get(deltaDays[i]); i += 1; }
+    return bal;
+  };
   const today = M.ymd();
-  const blocks = [];
+  const out = [];
+  if (filtered) {
+    const real = ops.filter((op) => !op.plan);
+    out.push(h('p', { class: 'feed-found' }, `Знайдено: ${real.length}`, feedType === 'transfer' ? null : h('b', {}, signedUah(opsChange(real)))));
+  }
   for (const date of shown) {
     const dayOps = ops.filter((op) => op.date === date);
-    const { expense, income } = totals(date);
-    const change = income - expense;
-    blocks.push(h('section', { class: 'day' }, h('h2', { class: 'day-title' }, M.dayHead(date, today)),
-      h('div', { class: 'card' },
-        dayOps.map(opRow),
-        feedCoin ? coinDayFoot(coin(feedCoin), dayOps) : h('div', { class: 'day-foot' },
-          h('div', {}, h('b', {}, M.money(Math.round(bal))), h('span', {}, 'на рахунках')),
-          h('div', {}, h('b', { class: change > 0 ? 'plus' : change < 0 ? 'minus' : '' }, M.money(change, 'UAH', { sign: change > 0 ? '+ ' : change < 0 ? '− ' : '' })), h('span', {}, 'зміна'))))));
-    bal -= delta.get(date) ?? 0;
+    let foot;
+    if (feedCoin) foot = coinDayFoot(coin(feedCoin), dayOps);
+    else if (filtered) {
+      // Під пошуком «на рахунках» не про знайдене — лише сума знайденого за день
+      const v = opsChange(dayOps);
+      foot = feedType === 'transfer' ? null : h('div', { class: 'day-foot' }, h('div', {}),
+        h('div', {}, h('b', { class: v > 0 ? 'plus' : v < 0 ? 'minus' : '' }, signedUah(v)), h('span', {}, 'знайдене')));
+    } else {
+      const { expense, income } = totals(date);
+      const change = income - expense;
+      foot = h('div', { class: 'day-foot' },
+        h('div', {}, h('b', {}, M.money(Math.round(balAt(date)))), h('span', {}, 'на рахунках')),
+        h('div', {}, h('b', { class: change > 0 ? 'plus' : change < 0 ? 'minus' : '' }, signedUah(change)), h('span', {}, 'зміна')));
+    }
+    out.push(h('section', { class: 'day' }, h('h2', { class: 'day-title' }, M.dayHead(date, today)),
+      h('div', { class: 'card' }, dayOps.map(opRow), foot)));
   }
-  return h('div', { class: 'page stack feed' }, blocks,
-    days.length > shown.length ? h('button', { type: 'button', class: 'more-btn', onClick: () => { feedDays += 60; render(); } }, 'Показати ще') : null);
+  if (days.length > shown.length) out.push(h('button', { type: 'button', class: 'more-btn', onClick: () => { feedDays += 60; render(); } }, 'Показати ще'));
+  return out;
+}
+
+function viewFeed() {
+  const list = h('div', { class: 'stack feed' }, feedList());
+  let timer = 0;
+  const search = h('input', {
+    type: 'search', class: 'field', value: feedQuery, enterkeyhint: 'search', 'aria-label': 'Пошук у стрічці',
+    placeholder: feedCoin ? 'Пошук: тег, коментар, сума…' : 'Пошук: рахунок, категорія, тег, коментар…',
+    // Список — без перемальовування всього екрана: поле не втрачає фокус і клавіатура не ховається
+    onInput: (e) => { feedQuery = e.target.value; clearTimeout(timer); timer = setTimeout(() => list.replaceChildren(...feedList()), 150); },
+  });
+  const types = feedCoin ? null : chips(FEED_TYPES, feedType, (v) => { feedType = v; list.replaceChildren(...feedList()); });
+  return h('div', { class: 'page stack feed-page' }, h('div', { class: 'feed-tools' }, search, types), list);
 }
 
 // ---------- звіти ----------
@@ -1694,7 +1759,7 @@ function route() {
   view = next;
   if (view === 'feed') {
     feedCoin = arg ?? null;
-    if (changed) feedDays = 60;
+    if (changed) { feedDays = 60; feedQuery = ''; feedType = 'all'; }
   }
   render();
   if (changed) scrollTo(0, 0);

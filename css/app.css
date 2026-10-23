@@ -509,3 +509,9 @@ details.icon-group > .icon-row { padding-bottom: 10px; }
 }
 .plan-hint .ico:first-child { color: var(--brand); }
 .plan-hint .ico:last-child { margin-left: auto; color: var(--muted); }
+
+/* пошук і тип у стрічці */
+.feed-tools { display: grid; gap: 8px; }
+.feed-tools .chips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.feed-found { display: flex; justify-content: space-between; margin: 0 4px; color: var(--muted); font-size: 14px; }
+.feed-found b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
