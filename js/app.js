@@ -222,8 +222,9 @@ function headStats() {
   return h('div', { class: 'stats' },
     stat('Баланс', totalBalance(), () => go('feed')),
     stat('Витрати', expense, report('expense')),
-    // «В планах» — скільки ще можна витратити цього місяця: бюджети мінус уже витрачене
-    plan ? stat('В планах', plan - expense, report('expense'), plan - expense < 0 ? 'minus' : '')
+    // Скільки ще можна витратити цього місяця: бюджети мінус уже витрачене; вийшли за бюджет — на скільки
+    plan ? (plan >= expense ? stat('Лишилось', plan - expense, report('expense'))
+      : stat('Понад бюджет', expense - plan, report('expense'), 'minus'))
       : stat('Доходи', income, report('income')));
 }
 
@@ -337,7 +338,7 @@ const pagerAt = new Map();
 function pager(key, items, perPage, cls) {
   const pages = [];
   for (let i = 0; i < items.length; i += perPage) pages.push(items.slice(i, i + perPage));
-  const track = h('div', { class: 'pager-track', 'data-pager': key },
+  const track = h('div', { class: 'pager-track', 'data-pager': key, 'data-per': perPage },
     pages.map((list) => h('div', { class: 'pager-page coin-grid' }, list)));
   const dots = pages.length > 1 ? h('div', { class: 'pager-dots', 'aria-hidden': 'true' }, pages.map(() => h('span'))) : null;
   const paint = () => {
@@ -411,14 +412,36 @@ function canDrop(src, dst) {
 const rowOf = (c) => (c.kind === 'goal' ? 'expense' : c.kind === 'debt' ? 'account' : c.kind);
 const canReorder = (src, dst) => Boolean(dst) && src.id !== dst.id && rowOf(src) === rowOf(dst);
 
-/** Перестановка: монета стає на місце тієї, на яку її кинули; решта ряду зсувається. */
-async function reorder(src, dstId) {
-  const list = state.coins.filter((c) => rowOf(c) === rowOf(src) && !c.archived).sort((a, b) => a.order - b.order);
-  const from = list.findIndex((c) => c.id === src.id);
-  const to = list.findIndex((c) => c.id === dstId);
+/**
+ * Перестановка наживо (режим правки): монета стає на місце тієї, над якою палець, решта ряду
+ * розступається — з анімацією, і між сторінками теж (сторінки перезаповнюються по data-per).
+ */
+function liveMove(el, target) {
+  const track = el.closest('.pager-track');
+  if (!track || target.closest('.pager-track') !== track) return;
+  const items = [...track.querySelectorAll(':scope > .pager-page > *')];
+  const from = items.indexOf(el);
+  const to = items.indexOf(target);
   if (from < 0 || to < 0) return;
-  list.splice(to, 0, list.splice(from, 1)[0]);
-  const put = list.map((c, i) => (c.order === i ? null : { ...c, order: i })).filter(Boolean);
+  const before = new Map(items.map((n) => [n, n.getBoundingClientRect()]));
+  items.splice(to, 0, items.splice(from, 1)[0]);
+  const pages = [...track.children];
+  const per = Number(track.dataset.per);
+  items.forEach((n, i) => pages[Math.floor(i / per)].append(n));
+  if (reduceMotion()) return;
+  for (const n of items) {
+    const a = before.get(n);
+    const b = n.getBoundingClientRect();
+    if (a.left !== b.left || a.top !== b.top) {
+      n.animate?.([{ transform: `translate(${a.left - b.left}px, ${a.top - b.top}px)` }, { transform: 'none' }], { duration: 180, easing: 'ease-out' });
+    }
+  }
+}
+
+/** Зберегти порядок ряду таким, як монети стоять у документі після перетягування. */
+async function saveOrder(el) {
+  const ids = [...(el.closest('.pager-track')?.querySelectorAll('.coin[data-id]') ?? [])].map((n) => n.dataset.id);
+  const put = ids.map((id) => coin(id)).map((c, i) => (c && c.order !== i ? { ...c, order: i } : null)).filter(Boolean);
   if (put.length) await save({ coins: { put } });
 }
 
@@ -563,6 +586,12 @@ function bindCoin(el, face, c) {
 
     const findTarget = () => {
       const t = document.elementFromPoint(at.x, at.y)?.closest('.coin.drop-ok');
+      // Режим правки: монета одразу стає на нове місце, решта розступається
+      if (editing()) {
+        if (t && t !== drag.over) { liveMove(el, t); vibrate(10); }
+        drag.over = t ?? null;
+        return;
+      }
       if (t !== drag.over) {
         drag.over?.classList.remove('drop-over');
         drag.over = t ?? null;
@@ -627,12 +656,16 @@ function bindCoin(el, face, c) {
       const target = drag?.over;
       const wasDrag = Boolean(drag);
       const tap = !moved && !long && ev.type === 'pointerup';
+      if (wasDrag && editing()) {
+        // Монета вже на новому місці — лишилось зберегти; скасований жест — повернути як було
+        cleanup();
+        if (ev.type === 'pointerup') saveOrder(el); else render();
+        return;
+      }
       const hit = wasDrag && target && ev.type === 'pointerup';
       cleanup(hit ? target : null);
-      if (hit) {
-        if (editing()) reorder(c, target.dataset.id);
-        else openAmount({ from: c.id, to: target.dataset.id });
-      } else if (tap) {
+      if (hit) openAmount({ from: c.id, to: target.dataset.id });
+      else if (tap) {
         if (editing()) editCoin(c);
         else openFeed(c.id);
       }
@@ -1636,7 +1669,7 @@ function periodCard() {
   }, Array.from({ length: 28 }, (_, i) => h('option', { value: String(i + 1), selected: i + 1 === day }, i === 0 ? '1 — календарний місяць' : `${i + 1}-го числа`)));
   return h('section', { class: 'card set-card' },
     h('h2', {}, 'Початок місяця'),
-    h('p', { class: 'muted small' }, 'З якого дня рахувати місяць: бюджети, «Витрати», «В планах» і звіт «Загальний». Зручно — з дня зарплати.'),
+    h('p', { class: 'muted small' }, 'З якого дня рахувати місяць: бюджети, «Витрати», «Лишилось» і звіт «Загальний». Зручно — з дня зарплати.'),
     select,
     day === 1 ? null : h('p', { class: 'muted small' }, `Зараз: ${periodTitle(currentPeriod())}`));
 }
