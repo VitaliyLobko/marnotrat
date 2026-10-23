@@ -1844,8 +1844,16 @@ async function importBackup(f) {
   try { data = JSON.parse(await f.text()); } catch { toast('Файл не читається як JSON'); return; }
   if (data?.app !== 'marnotrat' || !Array.isArray(data.coins) || !Array.isArray(data.ops)) { toast('Це не копія Марнотрата'); return; }
   sheet('Відновити з копії?', h('div', { class: 'form' },
-    h('p', {}, `Монет: ${data.coins.length}, операцій: ${data.ops.length}. Поточні дані на цьому телефоні буде замінено.`),
+    h('p', {}, `Монет: ${data.coins.length}, операцій: ${data.ops.length}.`),
+    h('p', { class: 'muted' }, '«Додати» — монети з тією ж назвою беруться наявні, яких нема — створюються, операції додаються до твоїх. «Замінити все» — поточні дані на цьому телефоні буде стерто.'),
     h('div', { class: 'btn-grid' },
+      h('button', {
+        type: 'button', class: 'btn', onClick: async () => {
+          closeSheet();
+          const n = await mergeBackup(data);
+          toast(`Додано операцій: ${n.ops}, нових монет: ${n.coins}`);
+        },
+      }, icon('check'), 'Додати до наявних'),
       h('button', {
         type: 'button', class: 'btn danger', onClick: async () => {
           closeSheet();
@@ -1854,8 +1862,45 @@ async function importBackup(f) {
           toast('Відновлено');
           render();
         },
-      }, icon('check'), 'Відновити'),
+      }, 'Замінити все'),
       h('button', { type: 'button', class: 'btn', onClick: () => closeSheet() }, 'Скасувати'))));
+}
+
+/**
+ * Злиття копії з наявним (зокрема перенесення історії з іншого застосунку): монета того ж виду з тією ж
+ * назвою — наявна, решта створюються; стартовий залишок рахунку додається до наявного. Операції з уже
+ * наявним id пропускаються — повторний імпорт не дублює. Іде звичайним save(), тож синхронізація підхоплює.
+ */
+async function mergeBackup(data) {
+  const key = (c) => `${c.kind}|${c.name.trim().toLocaleLowerCase('uk')}`;
+  const byKey = new Map(state.coins.map((c) => [key(c), c]));
+  const byId = new Set(state.coins.map((c) => c.id));
+  const known = new Set(state.ops.map((o) => o.id));
+  const fresh = data.ops.filter((o) => !known.has(o.id));
+  // Стартовий залишок — лише разом з операціями монети: повторний імпорт не додає його вдруге
+  const touched = new Set(fresh.flatMap((o) => [o.from, o.to]));
+  const ids = new Map();
+  const coins = [];
+  let created = 0;
+  let order = Math.max(0, ...state.coins.map((c) => c.order ?? 0)) + 1;
+  for (const c of data.coins) {
+    const have = byId.has(c.id) ? null : byKey.get(key(c));
+    if (byId.has(c.id)) ids.set(c.id, c.id);
+    else if (have) {
+      ids.set(c.id, have.id);
+      const start = c.start && touched.has(c.id) ? M.round2((have.start || 0) + c.start) : have.start;
+      // Бюджет з копії — лише якщо свого ще не задано
+      const budget = have.budget || c.budget || 0;
+      if (start !== have.start || budget !== have.budget) coins.push({ ...have, start, budget });
+    } else {
+      ids.set(c.id, c.id);
+      coins.push({ ...c, order: order++ });
+      created += 1;
+    }
+  }
+  const ops = fresh.map((o) => ({ ...o, from: ids.get(o.from) ?? o.from, to: ids.get(o.to) ?? o.to }));
+  await save({ coins: { put: coins }, ops: { put: ops } });
+  return { ops: ops.length, coins: created };
 }
 
 // ---------- меню й маршрути ----------
