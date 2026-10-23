@@ -108,18 +108,33 @@ export const toExpr = (v) => (v ? String(round2(v)).replace('.', ',') : '');
 
 export const KINDS = { income: 'Дохід', account: 'Рахунок', expense: 'Витрата', goal: 'Ціль' };
 
-/** Стан витрати за бюджетом: колір монети й частка заливки (0–1). */
-export function budgetState(spent, budget) {
+/** Яка частка місяця минула на кінець дня date: 23 жовтня — 23/31. */
+export function monthElapsed(date = ymd()) {
+  const d = parseYmd(date);
+  return d.getDate() / new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+}
+
+// Темп трат відносно того, скільки місяця минуло: вище — помаранчевий, ще вище — червоний
+export const PACE_WARN = 1;
+export const PACE_OVER = 1.3;
+// Поки операцій мало, одна велика покупка не робить монету червоною
+export const CALM_OPS = 4;
+
+/**
+ * Стан витрати за бюджетом: колір монети й частка заливки (0–1).
+ * Колір — від темпу, а не від відсотка: 85 % бюджету на 28-ме — нормально, 50 % на 5-те — ні.
+ * elapsed — частка минулого місяця, count — скільки операцій у монети за місяць.
+ */
+export function budgetState(spent, budget, { elapsed = 1, count = Infinity } = {}) {
   if (!spent) return { st: 'zero', fill: 0 };
   // Без бюджету монета не заливається: «повна зелена» читалась би як «усе в нормі на 100 %»
   if (!budget) return { st: 'free', fill: 0 };
   const share = spent / budget;
   if (share > 1) return { st: 'over', fill: 1 };
-  return { st: share >= WARN_SHARE ? 'warn' : 'ok', fill: share };
+  const pace = share / Math.max(elapsed, 1 / 31);
+  if (pace > PACE_OVER && count > CALM_OPS) return { st: 'over', fill: share };
+  return { st: pace > PACE_WARN ? 'warn' : 'ok', fill: share };
 }
-
-// Поріг «близько до ліміту» — помаранчевий
-export const WARN_SHARE = 0.8;
 
 // Іконки монет групами, як у Хобі-плані. Ключ, якого немає у власному наборі (icons.js), береться з Lucide
 // (icons-lucide.js; після правки списку — перезібрати: scripts/make_lucide.py).

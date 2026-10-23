@@ -161,11 +161,31 @@ const totalBalance = () => coinsOf('account').reduce((s, a) => s + toUah(balance
 
 // ---------- головна ----------
 
+/** Сума бюджетів витрат за місяць у гривнях; 0 — бюджетів не задано. */
+const planTotal = () => state.coins
+  .filter((c) => c.kind === 'expense' && !c.archived && c.budget > 0)
+  .reduce((s, c) => s + toUah(c.budget, c.currency), 0);
+
 function headStats() {
   const { expense, income } = totals(M.monthOf(M.ymd()));
-  // Підсумки в гривнях — без копійок: долари за курсом дають «54 451,10»
-  const stat = (label, v) => h('div', {}, h('span', {}, label), h('b', {}, M.money(Math.round(v))));
-  return h('div', { class: 'stats' }, stat('Баланс', totalBalance()), stat('Витрати', expense), stat('Доходи', income));
+  const plan = planTotal();
+  // Підсумки в гривнях — без копійок: долари за курсом дають «54 451,10». Тап — куди дивитись далі
+  const stat = (label, v, onClick, cls = '') => h('button', { type: 'button', class: 'stat', onClick },
+    h('span', {}, label), h('b', { class: cls }, `${v < 0 ? '−' : ''}${M.money(Math.round(v))}`));
+  const report = (kind) => () => { reportKind = kind; reportPick = null; go('report'); };
+  return h('div', { class: 'stats' },
+    stat('Баланс', totalBalance(), () => go('feed')),
+    stat('Витрати', expense, report('expense')),
+    // «В планах» — скільки ще можна витратити цього місяця: бюджети мінус уже витрачене
+    plan ? stat('В планах', plan - expense, report('expense'), plan - expense < 0 ? 'minus' : '')
+      : stat('Доходи', income, report('income')));
+}
+
+/** Колір монети витрати за поточний місяць — з темпом і кількістю операцій. */
+function coinBudget(c, spent, ym = M.monthOf(M.ymd())) {
+  const count = state.ops.filter((op) => op.to === c.id && inMonth(op, ym)).length;
+  const elapsed = ym === M.monthOf(M.ymd()) ? M.monthElapsed() : 1;
+  return M.budgetState(spent, c.budget, { elapsed, count });
 }
 
 // Суми монет, показані востаннє: змінену після збереження «докручуємо» до нової
@@ -191,7 +211,7 @@ function animateSums() {
 
 /** Маленька монета для рядків і шапки екрана суми — того ж кольору, що на головній. */
 function miniCoin(c) {
-  const st = c.kind === 'expense' ? M.budgetState(monthSpent(c, M.monthOf(M.ymd())), c.budget).st : '';
+  const st = c.kind === 'expense' ? coinBudget(c, monthSpent(c, M.monthOf(M.ymd()))).st : '';
   return h('span', { class: `mini-coin k-${c.kind}${st ? ` st-${st}` : ''}`, 'aria-hidden': 'true' }, icon(hasIcon(c.icon) ? c.icon : 'coins'));
 }
 
@@ -213,7 +233,7 @@ function coinEl(c, ym) {
     if (c.budget && sum >= c.budget) st = 'done';
   } else {
     sum = monthSpent(c, ym);
-    ({ st, fill } = M.budgetState(sum, c.budget));
+    ({ st, fill } = coinBudget(c, sum, ym));
     if (c.budget) sub = M.num(c.budget);
   }
   const face = h('div', { class: 'coin-face', style: { '--fill': String(fill) } },
