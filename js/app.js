@@ -1695,6 +1695,8 @@ function viewSettings() {
   const theme = chips(THEMES, recall('theme') || 'auto', (v) => { remember('theme', v); applyTheme(); });
   return h('div', { class: 'page stack' },
     aboutPanel(),
+    // Версія й «Перевірити оновлення» — одразу під «Про застосунок», а не в самому низу
+    aboutCard(),
     h('section', { class: 'card set-card' }, h('h2', {}, 'Тема'), theme),
     periodCard(),
     h('section', { class: 'card set-card' },
@@ -1724,8 +1726,7 @@ function viewSettings() {
       h('p', { class: 'muted small' }, Sync.syncOn()
         ? 'Стерти всі монети й операції — тут, на Google Диску й на інших твоїх телефонах. Лишаться стартові монети.'
         : 'Стерти всі монети й операції на цьому телефоні. Лишаться стартові монети.'),
-      h('button', { type: 'button', class: 'btn danger', onClick: wipeAll }, icon('close'), 'Стерти всі дані')),
-    aboutCard());
+      h('button', { type: 'button', class: 'btn danger', onClick: wipeAll }, icon('close'), 'Стерти всі дані')));
 }
 
 /** Сховані монети: повернути (сховав помилково) чи видалити разом з операціями. Нема схованих — картки нема. */
