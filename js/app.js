@@ -1734,6 +1734,7 @@ const MENU = [
   ['feed', 'feed', 'Стрічка'],
   ['days', 'daily', 'Звіт по днях'],
   ['report', 'pie', 'Загальний'],
+  ['history', 'chart', 'Історія'],
   ['subs', 'refresh', 'Регулярні платежі'],
   ['warranty', 'shield', 'Гарантії'],
   ['reconcile', 'check', 'Звірка залишків'],
@@ -1794,6 +1795,143 @@ function viewSubs() {
       inM ? h('div', {}, h('span', {}, 'Доходи на місяць'), h('b', { class: 'plus' }, `≈ ${M.money(Math.round(inM))}`), h('span', {}, `за рік ≈ ${M.money(Math.round(inM * 12))}`)) : null),
     active.length ? h('div', { class: 'card' }, active.map((op) => row(op, true))) : h('p', { class: 'empty' }, 'Усі регулярні платежі зупинено'),
     stopped.length ? h('details', { class: 'card fold-card' }, h('summary', {}, `Зупинені (${stopped.length})`), stopped.map((op) => row(op, false))) : null);
+}
+
+// ---------- історія: як міняється з місяця в місяць ----------
+
+// Що показувати: exp / inc / net — підсумки, c:<id> — монета, t:<тег> — тег витрат
+let histKey = 'exp';
+let histPick = null;
+const MONTHS_SHORT = ['січ', 'лют', 'бер', 'кві', 'тра', 'чер', 'лип', 'сер', 'вер', 'жов', 'лис', 'гру'];
+const HIST_N = 12;
+
+/** Ряд для графіка: назва, тип (exp — витратний, можна прогнозувати; inc; net — плюс і мінус) і значення за період. */
+function histSeries(key) {
+  if (key === 'inc') return { name: 'Усі доходи', kind: 'inc', value: (ym) => totals(ym).income };
+  if (key === 'net') return { name: 'Чистий дохід', kind: 'net', value: (ym) => { const t = totals(ym); return t.income - t.expense; } };
+  if (key.startsWith('c:')) {
+    const c = coin(key.slice(2));
+    if (c?.kind === 'income') return { name: c.name, kind: 'inc', value: (ym) => toUah(monthIncome(c, ym), c.currency) };
+    if (c) return { name: c.name, kind: 'exp', value: (ym) => toUah(monthSpent(c, ym), c.currency) };
+  }
+  if (key.startsWith('t:')) {
+    const tag = key.slice(2);
+    return {
+      name: `#${tag}`, kind: 'exp',
+      value: (ym) => state.ops.reduce((s, op) => (opType(op) === 'expense' && op.tags?.includes(tag) && inMonth(op, ym)
+        ? s + toUah(amountIn(op), coinOr(op.to).currency) : s), 0),
+    };
+  }
+  return { name: 'Усі витрати', kind: 'exp', value: (ym) => totals(ym).expense };
+}
+
+/** Вибір ряду: підсумки, витрати, доходи, теги — списком, бо монет і тегів багато. */
+function histSelect() {
+  const opt = (v, label) => h('option', { value: v, selected: v === histKey }, label);
+  const group = (label, items) => (items.length ? h('optgroup', { label }, items) : null);
+  return h('select', {
+    class: 'field', 'aria-label': 'Що показати',
+    onChange: (e) => { histKey = e.target.value; histPick = null; render(); },
+  },
+  group('Підсумки', [opt('exp', 'Усі витрати'), opt('inc', 'Усі доходи'), opt('net', 'Чистий дохід (доходи − витрати)')]),
+  group('Витрати', coinsOf('expense').map((c) => opt(`c:${c.id}`, c.name))),
+  group('Доходи', coinsOf('income').map((c) => opt(`c:${c.id}`, c.name))),
+  group('Теги', allTags().map((t) => opt(`t:${t}`, `#${t}`))));
+}
+
+/** Стовпчик із заокругленим кінцем далі від нуля: y0 — нуль, y1 — значення. */
+function barPath(x, w, y0, y1) {
+  const r = Math.min(4, Math.abs(y1 - y0), w / 2);
+  if (y1 === y0) return '';
+  const up = y1 < y0;
+  const e = up ? y1 + r : y1 - r;
+  return `M${x} ${y0}V${e}Q${x} ${y1} ${x + r} ${y1}H${x + w - r}Q${x + w} ${y1} ${x + w} ${e}V${y0}Z`;
+}
+
+function viewHistory() {
+  const s = histSeries(histKey);
+  const cur = currentPeriod();
+  const keys = Array.from({ length: HIST_N }, (_, i) => M.addMonths(cur, i - HIST_N + 1));
+  const vals = keys.map((k) => s.value(k));
+  // Прогноз на поточний період — лише для витрат: темп «скільки вже» ÷ «яка частка минула»
+  const el = periodElapsed(cur);
+  const fc = s.kind === 'exp' && el > 0 && el < 1 && vals.at(-1) > 0 ? vals.at(-1) / el : null;
+  // Середнє — по повних періодах, відколи є операції (місяці до першої операції — не нулі, а «ще не було»)
+  const firstOp = state.ops.reduce((m, op) => (op.date < m ? op.date : m), '9999');
+  const since = firstOp === '9999' ? cur : periodOf(firstOp);
+  const full = keys.slice(0, -1).map((k, i) => [k, vals[i]]).filter(([k]) => k >= since);
+  const avg = full.length ? full.reduce((a, [, v]) => a + v, 0) / full.length : null;
+  const pick = histPick && keys.includes(histPick) ? histPick : cur;
+
+  // Геометрія: viewBox, ширина тягнеться на всю картку
+  const W = 360;
+  const H = 190;
+  const top = 20;
+  const bottom = 22;
+  const hi = Math.max(0, ...vals, fc ?? 0, avg ?? 0);
+  const lo = Math.min(0, ...vals);
+  const span = hi - lo || 1;
+  const y = (v) => top + ((hi - v) / span) * (H - top - bottom);
+  const slot = W / HIST_N;
+  const bw = Math.min(22, slot - 6);
+  const y0 = y(0);
+  const fill = (v) => (s.kind === 'net' ? (v >= 0 ? 'var(--plus)' : 'var(--minus)') : 'var(--s1)');
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const sv = (tag, attrs, ...kids) => {
+    const n = document.createElementNS(svgNS, tag);
+    for (const [k, v] of Object.entries(attrs)) if (v != null) n.setAttribute(k, v);
+    n.append(...kids.flat().filter(Boolean));
+    return n;
+  };
+  const svg = sv('svg', { viewBox: `0 0 ${W} ${H}`, class: 'hist-svg', role: 'img', 'aria-label': `${s.name} за ${HIST_N} місяців` },
+    sv('line', { x1: 0, x2: W, y1: y0, y2: y0, class: 'hist-zero' }),
+    keys.map((k, i) => {
+      const x = i * slot + (slot - bw) / 2;
+      const v = vals[i];
+      const now = k === cur;
+      const label = `${periodTitle(k)}: ${M.money(Math.round(v))}`;
+      return sv('g', { class: `hist-col${k === pick ? ' on' : ''}${now ? ' now' : ''}` },
+        now && fc ? sv('path', { d: barPath(x, bw, y0, y(fc)), class: 'hist-fc' }) : null,
+        sv('path', { d: barPath(x, bw, y0, y(v)), fill: fill(v), class: 'hist-bar' }),
+        sv('text', { x: x + bw / 2, y: H - 6, class: 'hist-x' }, MONTHS_SHORT[Number(k.slice(5, 7)) - 1]),
+        // Зона натискання — уся колонка, не лише стовпчик
+        sv('rect', { x: i * slot, y: 0, width: slot, height: H, class: 'hist-hit', tabindex: '0', 'aria-label': label },
+          sv('title', {}, label)));
+    }),
+    avg != null && avg !== 0 ? [
+      sv('line', { x1: 0, x2: W, y1: y(avg), y2: y(avg), class: 'hist-avg' }),
+      sv('text', { x: 2, y: y(avg) - 4, class: 'hist-avg-t' }, 'середнє'),
+    ] : null);
+  const choose = (e) => {
+    const g = e.target.closest?.('.hist-col');
+    if (!g) return;
+    histPick = keys[[...svg.querySelectorAll('.hist-col')].indexOf(g)];
+    render();
+  };
+  svg.addEventListener('click', choose);
+  svg.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(e); } });
+
+  const pv = vals[keys.indexOf(pick)];
+  const fmt = (v) => (s.kind === 'net' ? signedUah(Math.round(v)) : M.money(Math.round(v)));
+  const readout = h('div', { class: 'hist-read' },
+    h('span', {}, `${periodTitle(pick)}${pick === cur ? ' · поки що' : ''}`),
+    h('b', { class: s.kind === 'net' ? (pv > 0 ? 'plus' : pv < 0 ? 'minus' : '') : '' }, fmt(pv)),
+    pick === cur && fc ? h('span', {}, `прогноз на кінець місяця ≈ ${M.money(Math.round(fc))}`) : null);
+  const tile = (label, v, sub = null) => h('div', {}, h('span', {}, label), h('b', {}, v), sub ? h('span', {}, sub) : null);
+  const sum12 = vals.reduce((a, v) => a + v, 0);
+  const stats = h('div', { class: 'card sub-total' },
+    tile('Середнє за місяць', avg == null ? '—' : fmt(avg), full.length ? `за ${full.length} повн. міс.` : 'ще немає повного місяця'),
+    tile(`Разом за ${HIST_N} міс.`, fmt(sum12)));
+  const table = h('details', { class: 'card fold-card' }, h('summary', {}, 'Таблицею'),
+    h('table', { class: 'hist-table' }, h('tbody', {}, [...keys].reverse().map((k) => h('tr', {},
+      h('td', {}, periodTitle(k)), h('td', {}, fmt(vals[keys.indexOf(k)])))))));
+  return h('div', { class: 'page stack' },
+    histSelect(),
+    h('div', { class: 'card hist-card' }, readout, svg,
+      h('p', { class: 'hist-key muted small' },
+        fc ? h('span', { class: 'hist-key-fc' }, 'пунктир — прогноз') : null,
+        avg != null ? h('span', { class: 'hist-key-avg' }, 'лінія — середнє') : null)),
+    stats, table);
 }
 
 // ---------- гарантії й фото чеків ----------
@@ -1968,6 +2106,7 @@ const VIEWS = {
   days: { title: 'Звіт по днях', render: viewDays },
   settings: { title: 'Налаштування', render: viewSettings },
   subs: { title: 'Регулярні платежі', render: viewSubs },
+  history: { title: 'Історія', render: viewHistory },
   warranty: { title: 'Гарантії', render: viewWarranty },
   reconcile: { title: 'Звірка залишків', render: viewReconcile },
 };
