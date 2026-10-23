@@ -1,9 +1,11 @@
 // IndexedDB: одна база, по сховищу на сутність, ключ — поле id.
 // Ім'я бази з префіксом застосунку: на vitaliylobko.github.io поруч живуть shooting-log, weight-log, hobby-planner.
 const DB_NAME = 'marnotrat';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 // coins — монети (доходи, рахунки, витрати); ops — операції; meta — курси й інше дрібне
 export const STORES = ['coins', 'ops', 'meta'];
+// files — фото чеків: лише на цьому телефоні, у стан, синхронізацію й резервну копію не йдуть
+const FILES = 'files';
 
 let opening;
 
@@ -13,7 +15,7 @@ function open() {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
-      for (const name of STORES) {
+      for (const name of [...STORES, FILES]) {
         if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, { keyPath: 'id' });
       }
     };
@@ -68,6 +70,26 @@ export async function write(changes) {
     }
   });
   return now;
+}
+
+/** Фото: { id, blob, created }. */
+export const putFile = (rec) => run([FILES], 'readwrite', (tx) => { tx.objectStore(FILES).put(rec); });
+
+export async function getFile(id) {
+  let out = null;
+  await run([FILES], 'readonly', (tx) => {
+    const req = tx.objectStore(FILES).get(id);
+    req.onsuccess = () => { out = req.result ?? null; };
+  });
+  return out;
+}
+
+/** Прибрати фото, на які не посилається жодна операція (видалені, скасовані, замінені). */
+export async function dropFilesExcept(keep) {
+  await run([FILES], 'readwrite', (tx) => {
+    const req = tx.objectStore(FILES).getAllKeys();
+    req.onsuccess = () => { for (const id of req.result) if (!keep.has(id)) tx.objectStore(FILES).delete(id); };
+  });
 }
 
 /** Повна заміна вмісту з резервної копії. */

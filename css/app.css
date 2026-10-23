@@ -550,3 +550,24 @@ details.icon-group > .icon-row { padding-bottom: 10px; }
 .rec-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .rec-name > span:last-child { display: flex; flex-direction: column; min-width: 0; }
 .rec-row .field { width: 40%; max-width: 160px; text-align: right; }
+
+/* гарантії й фото чеків */
+.warranty-line { display: grid; gap: 8px; }
+.photo-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.photo-thumb { position: relative; width: 64px; height: 64px; border-radius: 10px; overflow: hidden; background: var(--line); }
+.photo-thumb.missing { display: grid; place-items: center; padding: 4px; color: var(--muted); font-size: 11px; text-align: center; line-height: 1.2; }
+.photo-open { display: block; width: 100%; height: 100%; padding: 0; border: 0; background: none; cursor: zoom-in; }
+.photo-open img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.photo-x { position: absolute; top: 2px; right: 2px; width: 22px; height: 22px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: rgba(0, 0, 0, .6); color: #fff; cursor: pointer; }
+.photo-x .ico { width: 14px; height: 14px; }
+.photo-add { width: 64px; height: 64px; display: grid; place-items: center; border: 1.5px dashed var(--muted); border-radius: 10px; color: var(--muted); cursor: pointer; }
+.photo-view { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 12px; background: rgba(0, 0, 0, .92); cursor: zoom-out; }
+.photo-view img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.war-row { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.war-row:last-child { border-bottom: 0; }
+.war-row .photo-row { padding-left: 42px; }
+.war-row .photo-thumb { width: 48px; height: 48px; }
+.war-soon { color: var(--warn-ink) !important; font-weight: 600; }
+.plan-hint.warranty .ico:first-child { color: var(--warn); }
+/* панель «Деталі» вища за клавіатуру — гортається, сума вгорі не стискається */
+.amt-panel { max-height: 62dvh; overflow-y: auto; }

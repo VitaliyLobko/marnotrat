@@ -1,5 +1,5 @@
 // Марнотрат: головна з монетами, екран суми, стрічка, звіти, налаштування.
-import { loadAll, write, uid, replaceAll } from './db.js';
+import { loadAll, write, uid, replaceAll, putFile, getFile, dropFilesExcept } from './db.js';
 import * as M from './model.js';
 import * as Sync from './sync.js';
 import { demoChanges, demoRemoval, hasDemo } from './demo.js';
@@ -364,6 +364,13 @@ function planHint() {
       `${c.name}: ${bal > 0 ? 'час повернути тобі' : 'час віддати'} ${M.money(Math.abs(bal), c.currency)}`, icon('next'));
   });
   if (n) rows.unshift(h('button', { type: 'button', class: 'plan-hint', onClick: () => go('feed') }, icon('refresh'), `До проведення: ${n}`, icon('next')));
+  // Гарантія спливає за місяць — ще є час звернутись
+  const ending = warrantyOps().filter((op) => daysLeft(op.warranty) >= 0 && daysLeft(op.warranty) <= WARRANTY_SOON);
+  if (ending.length) {
+    const first = ending[0];
+    rows.push(h('button', { type: 'button', class: 'plan-hint warranty', onClick: () => go('warranty') }, icon('shield'),
+      ending.length === 1 ? `Гарантія: ${opName(first)} — до ${dmy(first.warranty)}` : `Гарантія спливає: ${ending.length} покупки за місяць`, icon('next')));
+  }
   return rows.length ? rows : null;
 }
 
@@ -580,7 +587,11 @@ function openAmount({ from, to, op = null, preset = null }) {
     date: preset ? (preset.date > M.ymd() ? M.ymd() : preset.date) : (op?.date ?? M.ymd()),
     panel: null,
     repeat: { every: op?.repeat?.every ?? '', until: op?.repeat?.until ?? '' },
+    warranty: op?.warranty ?? '',
+    photos: [...(op?.photos ?? [])],
   };
+  // id відомий заздалегідь: фото чека пишеться в базу одразу, з прив'язкою до операції
+  const recId = op?.id ?? uid();
   // Повтор задається в операції-правилі; проведений повтор свого не має
   const canRepeat = !preset && !op?.fromRule;
   const autoB = () => M.round2(M.calc(d.a) * rate(src.currency) / rate(dst.currency));
@@ -604,9 +615,11 @@ function openAmount({ from, to, op = null, preset = null }) {
     const expr = d.active === 'a' ? d.a : d.b;
     const v = M.calc(expr);
     res.textContent = M.hasOp(expr) ? (Number.isNaN(v) ? 'помилка' : `= ${M.num(v)}`) : '';
-    note.textContent = [d.tags.map((t) => `#${t}`).join(' '), d.comment, d.repeat.every ? `⟳ ${M.repeatLabel(d.repeat.every)}${d.repeat.until ? ` до ${M.dateTitle(d.repeat.until)}` : ''}` : ''].filter(Boolean).join(' · ');
+    note.textContent = [d.tags.map((t) => `#${t}`).join(' '), d.comment, d.repeat.every ? `⟳ ${M.repeatLabel(d.repeat.every)}${d.repeat.until ? ` до ${M.dateTitle(d.repeat.until)}` : ''}` : '',
+      d.warranty ? `гарантія до ${dmy(d.warranty)}` : '', d.photos.length ? `фото: ${d.photos.length}` : ''].filter(Boolean).join(' · ');
     paintTags();
     pad.querySelector('[aria-label="Повторювати"]')?.classList.toggle('on', Boolean(d.repeat.every));
+    pad.querySelector('[aria-label="Деталі"]')?.classList.toggle('on', Boolean(d.warranty || d.photos.length));
   };
   const paintTags = () => {
     const sugg = [...new Set([...d.tags, ...tagsFor(to)])].slice(0, 8);
@@ -653,10 +666,12 @@ function openAmount({ from, to, op = null, preset = null }) {
     const b = valueB();
     if (!(a > 0) || (two && !(b > 0))) { toast('Введи суму'); vibrate([30, 40, 30]); return; }
     const rec = {
-      id: op?.id ?? uid(), from, to, amount: a, date: date || d.date,
+      id: recId, from, to, amount: a, date: date || d.date,
       tags: d.tags, comment: d.comment.trim(), created: op?.created ?? Date.now(),
     };
     if (two) rec.amountTo = b;
+    if (d.warranty) rec.warranty = d.warranty;
+    if (d.photos.length) rec.photos = d.photos;
     if (preset) { rec.fromRule = preset.rule.id; rec.ruleDate = preset.date; }
     if (op?.fromRule) { rec.fromRule = op.fromRule; rec.ruleDate = op.ruleDate; }
     if (canRepeat && d.repeat.every) rec.repeat = { every: d.repeat.every, until: d.repeat.until, skip: op?.repeat?.skip ?? [] };
@@ -689,7 +704,7 @@ function openAmount({ from, to, op = null, preset = null }) {
       ['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((k) => key(k, () => digit(k))),
       key(',', () => digit(','), 'Кома'), key('0', () => digit('0')), key(icon('backspace'), back, 'Стерти')),
     h('div', { class: 'pad-ops' },
-      key(icon('comment'), () => showPanel('comment'), 'Коментар'),
+      key(icon('comment'), () => showPanel('comment'), 'Деталі'),
       key(icon('refresh'), () => (canRepeat ? showPanel('repeat') : toast('Повтор задається в першій операції — відкрий її')), 'Повторювати'),
       key('−', () => operator('−'), 'Мінус'), key('%', () => operator('%'), 'Відсоток'),
       key('+', () => operator('+'), 'Плюс'), key('×', () => operator('×'), 'Помножити'),
@@ -721,13 +736,30 @@ function openAmount({ from, to, op = null, preset = null }) {
       return;
     }
     if (kind === 'comment') {
-      const ta = h('textarea', { rows: 3, maxlength: 200, placeholder: 'Наприклад: Екофлоу', class: 'field' }, d.comment);
+      const ta = h('textarea', { rows: 2, maxlength: 200, placeholder: 'Наприклад: Екофлоу', class: 'field' }, d.comment);
+      // Гарантія: дата кінця або швидко — роки від дати покупки
+      const until = h('input', { type: 'date', class: 'field', value: d.warranty, min: d.date, 'aria-label': 'Гарантія до' });
+      const years = (n) => M.addDays(`${Number(d.date.slice(0, 4)) + n}${d.date.slice(4)}`, 0);
+      const quick = h('div', { class: 'chips' }, [[1, '1 рік'], [2, '2 роки'], [3, '3 роки']].map(([n, label]) => h('button', {
+        type: 'button', class: 'chip', onClick: () => { until.value = years(n); },
+      }, label)));
+      const photos = h('div', { class: 'photo-row' });
+      const drawPhotos = () => photos.replaceChildren(
+        ...d.photos.map((id) => photoThumb(id, () => { d.photos = d.photos.filter((x) => x !== id); drawPhotos(); })),
+        photoAdd(async (blob) => {
+          const id = uid();
+          await putFile({ id, blob, created: Date.now(), op: recId });
+          d.photos.push(id);
+          drawPhotos();
+        }));
+      drawPhotos();
       lower.replaceChildren(h('div', { class: 'amt-panel form' },
         h('label', { class: 'flabel' }, 'Коментар'), ta,
+        h('label', { class: 'flabel' }, 'Гарантія до'), h('div', { class: 'warranty-line' }, until, quick),
+        h('p', { class: 'flabel' }, 'Фото чека чи гарантійного талона'), photos,
         h('div', { class: 'btn-grid' }, h('button', {
-          type: 'button', class: 'btn primary', onClick: () => { d.comment = ta.value; hidePanel(); },
+          type: 'button', class: 'btn primary', onClick: () => { d.comment = ta.value; d.warranty = until.value; hidePanel(); },
         }, icon('check'), 'Готово'))));
-      ta.focus();
       return;
     }
     const input = h('input', { type: 'text', maxlength: 40, placeholder: 'Новий тег, напр. подарунки', class: 'field', enterkeyhint: 'done' });
@@ -822,7 +854,8 @@ function opRow(op) {
   const cur = t === 'income' ? dst.currency : src.currency;
   const sign = t === 'expense' ? '− ' : t === 'income' ? '+ ' : '';
   const every = op.plan ? op.rule.repeat.every : op.repeat?.every;
-  const note = [(op.tags ?? []).map((x) => `#${x}`).join(' '), op.comment, every ? `⟳ ${M.repeatLabel(every)}` : ''].filter(Boolean);
+  const note = [(op.tags ?? []).map((x) => `#${x}`).join(' '), op.comment, every ? `⟳ ${M.repeatLabel(every)}` : '',
+    op.warranty && !op.plan ? `гарантія до ${dmy(op.warranty)}` : '', op.photos?.length && !op.plan ? `фото: ${op.photos.length}` : ''].filter(Boolean);
   const second = op.amountTo != null && t === 'transfer' ? ` → ${M.money(op.amountTo, dst.currency)}` : '';
   // Запланований повтор: тап — провести з правкою суми, свайп вправо — провести як є, вліво — пропустити чи зупинити
   if (op.plan) {
@@ -1702,6 +1735,7 @@ const MENU = [
   ['days', 'daily', 'Звіт по днях'],
   ['report', 'pie', 'Загальний'],
   ['subs', 'refresh', 'Регулярні платежі'],
+  ['warranty', 'shield', 'Гарантії'],
   ['reconcile', 'check', 'Звірка залишків'],
   ['settings', 'gear', 'Налаштування'],
 ];
@@ -1760,6 +1794,86 @@ function viewSubs() {
       inM ? h('div', {}, h('span', {}, 'Доходи на місяць'), h('b', { class: 'plus' }, `≈ ${M.money(Math.round(inM))}`), h('span', {}, `за рік ≈ ${M.money(Math.round(inM * 12))}`)) : null),
     active.length ? h('div', { class: 'card' }, active.map((op) => row(op, true))) : h('p', { class: 'empty' }, 'Усі регулярні платежі зупинено'),
     stopped.length ? h('details', { class: 'card fold-card' }, h('summary', {}, `Зупинені (${stopped.length})`), stopped.map((op) => row(op, false))) : null);
+}
+
+// ---------- гарантії й фото чеків ----------
+
+const WARRANTY_SOON = 30;
+const daysLeft = (date) => Math.round((M.parseYmd(date) - M.parseYmd(M.ymd())) / 864e5);
+/** Операції з гарантією: найближчий кінець першим. */
+const warrantyOps = () => state.ops.filter((op) => op.warranty).sort((a, b) => a.warranty.localeCompare(b.warranty));
+const opName = (op) => op.comment || coinOr(op.to).name;
+
+/** Фото з телефона: зменшене до 1600 px по довшій стороні, JPEG — щоб база не розросталась. */
+async function shrinkPhoto(file) {
+  const bmp = await createImageBitmap(file);
+  const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bmp.width * k);
+  canvas.height = Math.round(bmp.height * k);
+  canvas.getContext('2d').drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  bmp.close();
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.82));
+}
+
+/** Кнопка «+ фото»: камера чи галерея — вибирає телефон. */
+function photoAdd(onBlob) {
+  const input = h('input', {
+    type: 'file', accept: 'image/*', hidden: true,
+    onChange: async () => {
+      const file = input.files[0];
+      input.value = '';
+      if (!file) return;
+      try { await onBlob(await shrinkPhoto(file)); } catch { toast('Не вдалося прочитати фото'); }
+    },
+  });
+  return h('label', { class: 'photo-add', 'aria-label': 'Додати фото' }, icon('camera'), input);
+}
+
+/** Мініатюра фото: тап — на весь екран, ✕ — прибрати з операції. Фото з іншого телефона тут немає. */
+function photoThumb(id, onRemove = null) {
+  const box = h('span', { class: 'photo-thumb' });
+  getFile(id).then((f) => {
+    if (!f) { box.classList.add('missing'); box.append(h('span', {}, 'на іншому телефоні')); return; }
+    const url = URL.createObjectURL(f.blob);
+    box.prepend(h('button', { type: 'button', class: 'photo-open', 'aria-label': 'Відкрити фото', onClick: () => showPhoto(url) },
+      h('img', { src: url, alt: '' })));
+  });
+  if (onRemove) box.append(h('button', { type: 'button', class: 'photo-x', 'aria-label': 'Прибрати фото', onClick: onRemove }, icon('close')));
+  return box;
+}
+
+/** Перегляд фото поверх усього: не шторка, щоб не закрити екран суми під ним. */
+function showPhoto(url) {
+  const box = h('div', { class: 'photo-view', role: 'dialog', 'aria-label': 'Фото', onClick: () => box.remove() },
+    h('img', { src: url, alt: 'Фото чека' }));
+  document.body.append(box);
+}
+
+function viewWarranty() {
+  const list = warrantyOps();
+  if (!list.length) {
+    return h('div', { class: 'page' }, h('p', { class: 'empty' }, 'Покупок з гарантією ще немає. На екрані суми натисни 💬 «Деталі» — там дата «Гарантія до» і фото чека.'));
+  }
+  const row = (op) => {
+    const left = daysLeft(op.warranty);
+    const src = coinOr(op.from);
+    const when = left < 0 ? `скінчилась ${dmy(op.warranty)}` : left === 0 ? 'останній день' : `до ${dmy(op.warranty)} · ще ${left} дн.`;
+    return h('div', { class: 'war-row' },
+      h('button', { type: 'button', class: 'sub-main', onClick: () => openAmount({ from: op.from, to: op.to, op }) },
+        miniCoin(coinOr(op.to)),
+        h('span', { class: 'sub-text' },
+          h('b', {}, opName(op)),
+          h('span', { class: left >= 0 && left <= WARRANTY_SOON ? 'war-soon' : '' }, `куплено ${dmy(op.date)} · ${when}`)),
+        h('span', { class: 'sub-sum' }, M.money(op.amount, src.currency))),
+      op.photos?.length ? h('div', { class: 'photo-row' }, op.photos.map((id) => photoThumb(id))) : null);
+  };
+  const active = list.filter((op) => daysLeft(op.warranty) >= 0);
+  const over = list.filter((op) => daysLeft(op.warranty) < 0).reverse();
+  return h('div', { class: 'page stack' },
+    h('p', { class: 'muted small' }, 'Фото чеків зберігаються лише на цьому телефоні — у Google Диск і резервну копію вони не йдуть.'),
+    active.length ? h('div', { class: 'card' }, active.map(row)) : h('p', { class: 'empty' }, 'Діючих гарантій немає'),
+    over.length ? h('details', { class: 'card fold-card' }, h('summary', {}, `Скінчились (${over.length})`), over.map(row)) : null);
 }
 
 // ---------- звірка залишків ----------
@@ -1854,6 +1968,7 @@ const VIEWS = {
   days: { title: 'Звіт по днях', render: viewDays },
   settings: { title: 'Налаштування', render: viewSettings },
   subs: { title: 'Регулярні платежі', render: viewSubs },
+  warranty: { title: 'Гарантії', render: viewWarranty },
   reconcile: { title: 'Звірка залишків', render: viewReconcile },
 };
 
@@ -1967,6 +2082,8 @@ async function init() {
   try {
     Object.assign(state, await loadAll());
     reportMonth = currentPeriod();
+    // Фото скасованих і видалених операцій — геть; тихо, старт не чекає
+    dropFilesExcept(new Set(state.ops.flatMap((op) => op.photos ?? []))).catch(() => {});
     if (!state.meta.some((m) => m.id === 'seeded')) {
       await save({ coins: { put: M.seedCoins(uid) }, meta: { put: [{ id: 'seeded', at: M.ymd() }] } }, { redraw: false });
     }
