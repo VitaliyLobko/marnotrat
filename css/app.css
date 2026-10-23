@@ -42,6 +42,7 @@
 }
 
 :root[data-theme="dark"] {
+  /* монети приглушені: на темному тлі яскрава заливка сліпить */
   --bg: #121417;
   --surface: #1b1e22;
   --surface-2: #252930;
@@ -51,19 +52,19 @@
   --muted: #959ca5;
   --brand: #0e9e6f;
   --brand-ink: #f2fffa;
-  --inc: #1b93c0;
+  --inc: #1a7699;
   --inc-ink: #4cc2ec;
-  --acc: #d9ad00;
-  --acc-ink: #f2c230;
+  --acc: #9d7f1f;
+  --acc-ink: #dcb442;
   --coin-empty: #3a3f47;
-  --goal: #179fb0;
+  --goal: #167f8c;
   --goal-ink: #4fd3e3;
-  --coin-ico: #eef1f4;
-  --ok: #10a874;
+  --coin-ico: #e2e5e9;
+  --ok: #138a62;
   --ok-ink: #3ad39c;
-  --warn: #e07a00;
+  --warn: #b8660f;
   --warn-ink: #ffa033;
-  --over: #c8332f;
+  --over: #a5362f;
   --over-ink: #ff6b66;
   --plus: #3ad39c;
   --minus: #ff6b66;
