@@ -1200,6 +1200,7 @@ function viewSettings() {
   const file = h('input', { type: 'file', accept: 'application/json,.json', hidden: true, onChange: (e) => importBackup(e.target.files[0]) });
   const theme = chips(THEMES, recall('theme') || 'auto', (v) => { remember('theme', v); applyTheme(); });
   return h('div', { class: 'page stack' },
+    aboutPanel(),
     h('section', { class: 'card set-card' }, h('h2', {}, 'Тема'), theme),
     h('section', { class: 'card set-card' },
       h('h2', {}, 'Курси до гривні'),
@@ -1222,7 +1223,6 @@ function viewSettings() {
         h('button', { type: 'button', class: 'btn', onClick: exportBackup }, icon('archive'), 'Зберегти копію'),
         h('button', { type: 'button', class: 'btn', onClick: () => file.click() }, icon('undo'), 'Відновити')),
       file),
-    aboutPanel(),
     aboutCard());
 }
 
