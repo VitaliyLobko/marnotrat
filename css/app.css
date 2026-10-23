@@ -185,13 +185,13 @@ a { color: var(--brand); }
 .st-over .coin-fill { background: var(--over); }
 /* без бюджету: сіра монета з зеленим обідком */
 .st-free .coin-face { box-shadow: inset 0 0 0 4px var(--ok); }
-.coin-sum { font-size: 14px; font-weight: 500; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.coin-sum { font-size: 13px; font-weight: 500; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .k-income .coin-sum { color: var(--inc-ink); }
 .k-account .coin-sum { color: var(--acc-ink); }
 .k-expense .coin-sum { color: var(--ok-ink); }
 .k-expense.st-warn .coin-sum { color: var(--warn-ink); }
 .k-expense.st-over .coin-sum { color: var(--over-ink); }
-.coin-sub { margin-top: -4px; font-size: 12px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.coin-sub { margin-top: -4px; font-size: 11px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .coin-add { border: 0; background: none; font: inherit; }
 .coin-add .coin-face { background: none; border: 2px dashed var(--line); color: var(--muted); touch-action: auto; }
 .coin-add .coin-face .ico { width: 40%; }
@@ -492,3 +492,7 @@ details.icon-group > .icon-row { padding-bottom: 10px; }
 .day { display: flex; flex-direction: column; gap: 8px; }
 .feed .day-title { margin: 0 4px; font-size: 16px; }
 .feed .card { border-radius: 10px; }
+
+/* ряд рахунків закріплений угорі: витрати гортаються під ним */
+.main .accounts { position: sticky; top: var(--topbar-h, 60px); z-index: 5; }
+.main .accounts.stuck { box-shadow: 0 6px 10px -6px rgb(0 0 0 / .35); }

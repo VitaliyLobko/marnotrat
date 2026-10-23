@@ -1499,6 +1499,8 @@ function fitNames() {
 
 function render() {
   topbar();
+  // Ряд рахунків прилипає під шапку — їй висота з вирізом екрана, тож міряємо, а не вгадуємо
+  document.documentElement.style.setProperty('--topbar-h', `${$('topbar').offsetHeight}px`);
   $('view').replaceChildren(VIEWS[view].render());
   if (onMain()) { fitNames(); animateSums(); }
 }
@@ -1570,6 +1572,11 @@ async function init() {
   document.addEventListener('pointerup', () => { if (Sync.syncOn() && !Sync.tokenValid()) runSync({ gesture: true }); }, true);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') runSync(); });
   addEventListener('resize', () => { if (onMain()) fitNames(); });
+  // Тінь під закріпленим рядом рахунків — лише коли під ним уже гортаються витрати
+  addEventListener('scroll', () => {
+    const row = onMain() && document.querySelector('.main .accounts');
+    if (row) row.classList.toggle('stuck', row.getBoundingClientRect().top <= $('topbar').offsetHeight + 0.5 && scrollY > 0);
+  }, { passive: true });
   route();
   // Курс НБУ — раз на день, тихо: без зв'язку лишається попередній
   fetchRates().then((changed) => { if (changed && view !== 'settings') render(); }).catch(() => {});
