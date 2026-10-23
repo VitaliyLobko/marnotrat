@@ -1513,8 +1513,10 @@ const searchKey = (s) => s.toLocaleLowerCase('uk').replace(/[’ʼ`]/g, "'").tri
 /** Іконки групами з підзаголовками (гроші, продукти, дім…), зверху — пошук за назвою; як у Хобі-плані. */
 function iconPicker(d) {
   const buttons = [];
+  const current = h('span', { class: 'icon-pick-now' });
   const paint = () => {
     for (const b of buttons) b.setAttribute('aria-pressed', String(b.dataset.v === d.icon));
+    current.replaceChildren(icon(hasIcon(d.icon) ? d.icon : 'coins'));
   };
   const groups = M.ICON_GROUPS.map((g) => {
     const row = h('div', { class: 'icon-row', role: 'group', 'aria-label': g.title });
@@ -1559,7 +1561,10 @@ function iconPicker(d) {
     onInput: (e) => filter(searchKey(e.target.value)),
   });
   paint();
-  return h('div', { class: 'icon-picker' }, search, h('div', { class: 'icon-groups' }, empty, groups));
+  // Увесь вибір — одним рядком, що розгортається: інакше до «Зберегти» довго гортати
+  return h('details', { class: 'icon-pick-all' },
+    h('summary', {}, current, h('span', {}, 'Іконка'), h('span', { class: 'muted small' }, 'змінити')),
+    h('div', { class: 'icon-picker' }, search, h('div', { class: 'icon-groups' }, empty, groups)));
 }
 
 function editCoin(orig, kind = orig?.kind) {
@@ -1625,7 +1630,7 @@ function editCoin(orig, kind = orig?.kind) {
     ] : null,
     kind !== 'account' && !debt ? [h('label', { class: 'flabel' }, budgetLabel), budget] : null,
     holds ? [h('label', { class: 'flabel' }, startLabel), start] : null,
-    h('p', { class: 'flabel' }, 'Іконка'), grid,
+    grid,
     h('div', { class: 'btn-grid' },
       h('button', { type: 'button', class: 'btn primary', onClick: store }, icon('check'), 'Зберегти'),
       orig ? h('button', { type: 'button', class: 'btn danger', onClick: remove }, icon('trash'), used ? 'Сховати' : 'Видалити') : null)));
