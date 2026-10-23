@@ -234,6 +234,9 @@ function coinBudget(c, spent, ym = currentPeriod()) {
   return M.budgetState(spent, c.budget, { elapsed, count });
 }
 
+// Сума монети зі знаком: рахунок буває в мінусі (кредитка), і без «−» його не відрізнити
+const coinMoney = (v, cur) => M.money(v, cur, { sign: v < 0 ? '−' : '' });
+
 // Суми монет, показані востаннє: змінену після збереження «докручуємо» до нової
 const shownSums = new Map();
 const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -248,7 +251,7 @@ function animateSums() {
     const step = (t) => {
       const k = Math.min(1, (t - t0) / 450);
       const e = 1 - (1 - k) ** 3;
-      el.textContent = M.money(k < 1 ? from + (to - from) * e : to, cur);
+      el.textContent = coinMoney(k < 1 ? from + (to - from) * e : to, cur);
       if (k < 1) requestAnimationFrame(step);
     };
     requestAnimationFrame(step);
@@ -310,10 +313,10 @@ function coinEl(c, ym) {
 function sumEl(c, sum) {
   const prev = shownSums.get(c.id);
   shownSums.set(c.id, sum);
-  const el = h('div', { class: 'coin-sum' }, M.money(sum, c.currency));
+  const el = h('div', { class: 'coin-sum' }, coinMoney(sum, c.currency));
   if (prev !== undefined && prev !== sum && !reduceMotion()) {
     Object.assign(el.dataset, { from: String(prev), to: String(sum), cur: c.currency });
-    el.textContent = M.money(prev, c.currency);
+    el.textContent = coinMoney(prev, c.currency);
   }
   return el;
 }
@@ -2446,7 +2449,7 @@ function viewReconcile() {
       h('span', { class: 'hero-cap' }, 'Давно не вносив витрати?'),
       h('span', { class: 'hero-sub' }, 'Впиши, скільки зараз насправді на кожному рахунку. Різниця запишеться однією операцією: недостача — витратою «Не пам’ятаю», надлишок — доходом.')),
     h('div', { class: 'card' }, accs.map((c, i) => h('label', { class: 'rec-row' },
-      h('span', { class: 'rec-name' }, miniCoin(c), h('span', {}, h('b', {}, c.name), h('span', { class: 'muted small' }, `в обліку ${M.money(balance(c), c.currency)}`))),
+      h('span', { class: 'rec-name' }, miniCoin(c), h('span', {}, h('b', {}, c.name), h('span', { class: 'muted small' }, `в обліку ${coinMoney(balance(c), c.currency)}`))),
       h('span', { class: 'rec-in' }, fields[i], diffs[i])))),
     runBtn);
 }
