@@ -468,9 +468,10 @@ const allTags = () => [...new Set(state.ops.flatMap((op) => op.tags ?? []))].sor
  * Різні валюти «звідки» й «куди» — два рядки; другий рахується за курсом, поки його не змінили руками.
  */
 function openAmount({ from, to, op = null }) {
-  const src = coinOr(from);
-  const dst = coinOr(to);
-  const two = src.currency !== dst.currency;
+  // Звідки й куди можна змінити тапом по монеті вгорі — тому не const
+  let src = coinOr(from);
+  let dst = coinOr(to);
+  let two = src.currency !== dst.currency;
   const d = {
     a: op ? M.toExpr(op.amount) : '',
     b: op && two ? M.toExpr(amountIn(op)) : '',
@@ -497,6 +498,8 @@ function openAmount({ from, to, op = null }) {
   };
   const paint = () => {
     line(lineA, d.a, src.currency, d.active === 'a', '0');
+    lineB.hidden = !two;
+    tagBar.hidden = dst.kind !== 'expense';
     if (two) line(lineB, d.bOwn ? d.b : M.toExpr(autoB()), dst.currency, d.active === 'b', '0');
     const expr = d.active === 'a' ? d.a : d.b;
     const v = M.calc(expr);
@@ -633,17 +636,48 @@ function openAmount({ from, to, op = null }) {
   };
   const hidePanel = () => { d.panel = null; lower.replaceChildren(pad, dates); paint(); };
 
+  // Тап по монеті вгорі — вибір іншої: лише ті, між якими така операція можлива
+  const route = h('div', { class: 'amt-route' });
+  const paintRoute = () => {
+    const end = (c, side) => h('button', {
+      type: 'button', class: `amt-end${d.panel === side ? ' on' : ''}`, 'aria-label': side === 'from' ? `Звідки: ${c.name}` : `Куди: ${c.name}`,
+      onClick: () => (d.panel === side ? hidePanel() : pickCoin(side)),
+    }, miniCoin(c), h('span', {}, c.name));
+    route.replaceChildren(end(src, 'from'), icon('next'), end(dst, 'to'));
+  };
+  const pickCoin = (side) => {
+    d.panel = side;
+    const fits = state.coins
+      .filter((c) => !c.archived && (side === 'from' ? canDrop(c, dst) : canDrop(src, c)))
+      .sort((a, b) => a.order - b.order);
+    const cur = side === 'from' ? src : dst;
+    lower.replaceChildren(h('div', { class: 'amt-panel form' },
+      h('label', { class: 'flabel' }, side === 'from' ? 'Звідки' : 'Куди'),
+      h('div', { class: 'pick-coins' }, [cur, ...fits.filter((c) => c.id !== cur.id)].map((c) => h('button', {
+        type: 'button', class: `pick-coin${c.id === cur.id ? ' on' : ''}`, onClick: () => setEnd(side, c),
+      }, miniCoin(c), h('span', {}, c.name))))));
+    paintRoute();
+  };
+  const setEnd = (side, c) => {
+    if (side === 'from') { src = c; from = c.id; } else { dst = c; to = c.id; }
+    const wasTwo = two;
+    two = src.currency !== dst.currency;
+    // Інша пара валют — друга сума за курсом заново
+    if (two !== wasTwo || two) { d.b = ''; d.bOwn = false; d.bTyped = false; d.active = 'a'; }
+    hidePanel();
+    paintRoute();
+  };
+
   const screen = h('div', { class: 'amt' },
     h('div', { class: 'amt-head' },
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Скасувати', onClick: () => closeSheet() }, icon('close')),
-      h('div', { class: 'amt-route' },
-        h('span', { class: 'amt-end' }, miniCoin(src), h('span', {}, src.name)), icon('next'),
-        h('span', { class: 'amt-end' }, miniCoin(dst), h('span', {}, dst.name))),
+      route,
       op ? h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Видалити', onClick: remove }, icon('trash')) : null,
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Зберегти', onClick: () => store() }, icon('check'))),
-    h('div', { class: 'amt-body' }, lineA, two ? lineB : null, res, note));
+    h('div', { class: 'amt-body' }, lineA, lineB, res, note));
   lower.replaceChildren(pad, dates);
-  sheet(`${src.name} → ${dst.name}`, [screen.firstChild, screen.lastChild, dst.kind === 'expense' ? tagBar : null, lower], { cls: 'screen', bare: true });
+  sheet(`${src.name} → ${dst.name}`, [screen.firstChild, screen.lastChild, tagBar, lower], { cls: 'screen', bare: true });
+  paintRoute();
   paint();
 
   // Фізична клавіатура (комп'ютер): цифри, дії, Enter, Backspace
@@ -674,7 +708,6 @@ function opRow(op) {
   const note = [(op.tags ?? []).map((x) => `#${x}`).join(' '), op.comment].filter(Boolean);
   const second = op.amountTo != null && t === 'transfer' ? ` → ${M.money(op.amountTo, dst.currency)}` : '';
   const row = h('button', { type: 'button', class: 'op-row', onClick: () => openAmount({ from: op.from, to: op.to, op }) },
-    miniCoin(t === 'income' ? src : dst),
     h('span', { class: 'op-ends' }, h('span', { class: 'op-from' }, src.name), h('span', { class: 'op-to' }, dst.name)),
     h('span', { class: 'op-right' },
       h('span', { class: `op-sum ${t}` }, M.money(v, cur, { sign }) + second),
@@ -744,6 +777,24 @@ function swipeRow(row, { onLeft, onRight }) {
 
 const byNewest = (a, b) => b.date.localeCompare(a.date) || (b.created ?? b.updated ?? 0) - (a.created ?? a.updated ?? 0);
 
+/**
+ * Підсумок дня в стрічці однієї монети — «зміна» в її валюті: витрата — мінус витрачене,
+ * дохід — плюс отримане, рахунок і ціль — прихід мінус розхід.
+ */
+function coinDayFoot(c, dayOps) {
+  if (!c) return null;
+  let v = 0;
+  for (const op of dayOps) {
+    if (op.to === c.id) v += amountIn(op);
+    if (op.from === c.id) v -= op.amount;
+  }
+  if (c.kind === 'expense' || c.kind === 'income') v = -v;
+  const sign = v > 0 ? '+ ' : v < 0 ? '− ' : '';
+  return h('div', { class: 'day-foot' },
+    h('div', {}),
+    h('div', {}, h('b', { class: v > 0 ? 'plus' : v < 0 ? 'minus' : '' }, M.money(v, c.currency, { sign })), h('span', {}, 'зміна')));
+}
+
 function viewFeed() {
   const ops = state.ops.filter((op) => !feedCoin || op.from === feedCoin || op.to === feedCoin).sort(byNewest);
   if (!ops.length) return h('p', { class: 'empty' }, feedCoin ? 'У цієї монети ще немає операцій' : 'Ще немає операцій — потягни монету на головній');
@@ -764,7 +815,7 @@ function viewFeed() {
     blocks.push(h('h2', { class: 'day-title' }, M.dayHead(date, today)),
       h('div', { class: 'card' },
         dayOps.map(opRow),
-        feedCoin ? null : h('div', { class: 'day-foot' },
+        feedCoin ? coinDayFoot(coin(feedCoin), dayOps) : h('div', { class: 'day-foot' },
           h('div', {}, h('b', {}, M.money(Math.round(bal))), h('span', {}, 'на рахунках')),
           h('div', {}, h('b', { class: change > 0 ? 'plus' : change < 0 ? 'minus' : '' }, M.money(change, 'UAH', { sign: change > 0 ? '+ ' : change < 0 ? '− ' : '' })), h('span', {}, 'зміна')))));
     bal -= delta.get(date) ?? 0;
@@ -909,6 +960,55 @@ function viewDays() {
 const NEW_ICON = { account: 'wallet', income: 'banknote', expense: 'shopping-cart', goal: 'piggy-bank' };
 const GRID_KINDS = [['expense', 'Витрата'], ['goal', 'Ціль']];
 
+// Пошук без різниці між великими літерами й видами апострофа
+const searchKey = (s) => s.toLocaleLowerCase('uk').replace(/[’ʼ`]/g, "'").trim();
+
+/** Іконки групами з підзаголовками (гроші, продукти, дім…), зверху — пошук за назвою; як у Хобі-плані. */
+function iconPicker(d) {
+  const buttons = [];
+  const paint = () => {
+    for (const b of buttons) b.setAttribute('aria-pressed', String(b.dataset.v === d.icon));
+  };
+  const groups = M.ICON_GROUPS.map((g) => {
+    const row = h('div', { class: 'icon-row', role: 'group', 'aria-label': g.title });
+    for (const [key, name] of g.icons) {
+      if (!hasIcon(key)) continue;
+      const b = h('button', {
+        type: 'button', class: 'icon-opt', 'aria-label': name, title: name, 'data-v': key,
+        onClick: () => { d.icon = key; paint(); },
+      }, icon(key));
+      b.dataset.find = searchKey(name);
+      buttons.push(b);
+      row.append(b);
+    }
+    const el = h('div', { class: 'icon-group' }, h('p', { class: 'icon-group-title' }, g.title), row);
+    el.dataset.find = searchKey(g.title);
+    return el;
+  });
+  const empty = h('p', { class: 'muted small', hidden: true }, 'Нічого не знайдено');
+  // Назва групи теж шукається: «транспорт» показує всю групу
+  const filter = (q) => {
+    let shown = 0;
+    for (const g of groups) {
+      const whole = !q || g.dataset.find.includes(q);
+      let inGroup = 0;
+      for (const b of g.querySelectorAll('.icon-opt')) {
+        b.hidden = !(whole || b.dataset.find.includes(q));
+        if (!b.hidden) inGroup += 1;
+      }
+      g.hidden = inGroup === 0;
+      shown += inGroup;
+    }
+    empty.hidden = shown > 0;
+  };
+  const search = h('input', {
+    type: 'search', class: 'field', placeholder: 'Пошук: кава, таксі, ліки…', 'aria-label': 'Пошук іконки', enterkeyhint: 'search',
+    onInput: (e) => filter(searchKey(e.target.value)),
+  });
+  paint();
+  return h('div', { class: 'icon-picker' }, search, h('div', { class: 'icon-groups' }, empty, groups));
+}
+
 function editCoin(orig, kind = orig?.kind) {
   const d = orig ? structuredClone(orig)
     : { id: uid(), kind, name: '', icon: NEW_ICON[kind], currency: 'UAH', budget: 0, start: 0, order: Date.now(), archived: false };
@@ -921,15 +1021,7 @@ function editCoin(orig, kind = orig?.kind) {
   const budget = amountField(d.budget, budgetLabel);
   const startLabel = kind === 'goal' ? 'Уже відкладено' : 'Залишок зараз';
   const start = amountField(orig ? balance(orig) : 0, startLabel);
-  const icons = M.COIN_ICONS.filter(hasIcon);
-  const grid = h('div', { class: 'icon-grid', role: 'group', 'aria-label': 'Іконка' });
-  const paintIcons = () => {
-    for (const b of grid.children) b.setAttribute('aria-pressed', String(b.dataset.v === d.icon));
-  };
-  for (const k of icons) {
-    grid.append(h('button', { type: 'button', class: 'icon-opt', 'data-v': k, 'aria-label': k, onClick: () => { d.icon = k; paintIcons(); } }, icon(k)));
-  }
-  paintIcons();
+  const grid = iconPicker(d);
   const store = async () => {
     const rec = { ...d, name: name.value.trim() };
     if (!rec.name) { toast('Дай назву'); return; }

@@ -26,7 +26,7 @@ export function addMonths(ym, n) {
 
 const MONTHS = ['січень', 'лютий', 'березень', 'квітень', 'травень', 'червень', 'липень', 'серпень', 'вересень', 'жовтень', 'листопад', 'грудень'];
 const MONTHS_GEN = ['січня', 'лютого', 'березня', 'квітня', 'травня', 'червня', 'липня', 'серпня', 'вересня', 'жовтня', 'листопада', 'грудня'];
-const WEEKDAYS = ['неділя', 'понеділок', 'вівторок', 'середа', 'четвер', "п'ятниця", 'субота'];
+const WEEKDAYS = ['НД', 'ПН', 'ВТ', 'СР', 'ЧТ', 'ПТ', 'СБ'];
 
 /** «жовтень 2026» */
 export const monthTitle = (ym) => `${MONTHS[Number(ym.slice(5, 7)) - 1]} ${ym.slice(0, 4)}`;
@@ -34,14 +34,13 @@ export const monthTitle = (ym) => `${MONTHS[Number(ym.slice(5, 7)) - 1]} ${ym.sl
 /** «23 жовтня 2026» */
 export const dateTitle = (date) => `${Number(date.slice(8, 10))} ${MONTHS_GEN[Number(date.slice(5, 7)) - 1]} ${date.slice(0, 4)}`;
 
-/** Заголовок дня в стрічці: «Сьогодні, 23 жовтня», «Вчора, …», «Середа, 21 жовтня»; інший рік — з роком. */
+/** Заголовок дня в стрічці, як у CoinKeeper: «СЬОГОДНІ, 23 жовтня», «ВЧОРА, …», «ПН, 12 жовтня»; інший рік — з роком. */
 export function dayHead(date, today = ymd()) {
   const day = `${Number(date.slice(8, 10))} ${MONTHS_GEN[Number(date.slice(5, 7)) - 1]}`;
   const tail = date.slice(0, 4) === today.slice(0, 4) ? day : `${day} ${date.slice(0, 4)}`;
-  if (date === today) return `Сьогодні, ${tail}`;
-  if (date === addDays(today, -1)) return `Вчора, ${tail}`;
-  const wd = WEEKDAYS[parseYmd(date).getDay()];
-  return `${wd[0].toUpperCase()}${wd.slice(1)}, ${tail}`;
+  if (date === today) return `СЬОГОДНІ, ${tail}`;
+  if (date === addDays(today, -1)) return `ВЧОРА, ${tail}`;
+  return `${WEEKDAYS[parseYmd(date).getDay()]}, ${tail}`;
 }
 
 // ---------- гроші ----------
@@ -122,16 +121,86 @@ export function budgetState(spent, budget) {
 // Поріг «близько до ліміту» — помаранчевий
 export const WARN_SHARE = 0.8;
 
-/** Іконки на вибір для монет — з наборів icons.js і Lucide. */
-export const COIN_ICONS = [
-  'wallet', 'card', 'banknote', 'piggy-bank', 'landmark', 'coins', 'briefcase', 'laptop', 'gift', 'trophy',
-  'shopping-cart', 'shopping-basket', 'shopping-bag', 'utensils', 'coffee', 'pizza', 'cup-soda', 'wine', 'beer',
-  'house', 'sofa', 'plug', 'droplet', 'wifi', 'phone', 'smartphone', 'tv', 'calc', 'receipt', 'hammer', 'wrench',
-  'car', 'bus', 'car-taxi-front', 'train-front', 'plane', 'fuel', 'shirt', 'gem', 'scissors',
-  'heart', 'heart-pulse', 'pill', 'stethoscope', 'briefcase-medical', 'dumbbell', 'biceps-flexed', 'bike',
-  'book-open', 'graduation-cap', 'music', 'film', 'gamepad-2', 'tickets', 'party-popper', 'camera', 'palette',
-  'crosshair', 'target', 'tent-tree', 'backpack', 'map-pin', 'luggage',
-  'baby', 'users', 'smile', 'paw', 'cat', 'dog', 'bird', 'fish', 'flower', 'sprout', 'tool', 'box', 'star',
+// Іконки монет групами, як у Хобі-плані. Ключ, якого немає у власному наборі (icons.js), береться з Lucide
+// (icons-lucide.js; після правки списку — перезібрати: scripts/make_lucide.py).
+// Ключ зберігається в монеті — уже наявні ключі не перейменовувати й не прибирати.
+export const ICON_GROUPS = [
+  { title: 'Гроші й рахунки', icons: [
+    ['wallet', 'Гаманець'], ['card', 'Картка'], ['credit-card', 'Кредитка'], ['banknote', 'Готівка'],
+    ['coins', 'Монети'], ['piggy-bank', 'Скарбничка'], ['landmark', 'Банк'], ['vault', 'Сейф'],
+    ['hand-coins', 'Позика'], ['handshake', 'Борг'], ['badge-percent', 'Відсотки'], ['percent', 'Знижка'],
+    ['trending-up', 'Інвестиції'], ['chart', 'Акції'], ['bitcoin', 'Крипта'], ['dollar-sign', 'Долари'],
+    ['euro', 'Євро'], ['receipt', 'Чек'], ['calc', 'Рахунки'], ['scale', 'Податки'],
+    ['briefcase', 'Робота'], ['laptop', 'Фриланс'], ['gift', 'Подарунок'], ['trophy', 'Премія'],
+    ['award', 'Бонус'], ['ticket-percent', 'Кешбек'], ['arrow-left-right', 'Переказ'], ['repeat', 'Підписка'],
+  ] },
+  { title: 'Продукти й їжа', icons: [
+    ['shopping-cart', 'Візок'], ['shopping-basket', 'Кошик'], ['store', 'Магазин'], ['apple', 'Фрукти'],
+    ['carrot', 'Овочі'], ['beef', "М'ясо"], ['ham', 'Ковбаса'], ['fish', 'Риба'],
+    ['egg', 'Яйця'], ['milk', 'Молоко'], ['wheat', 'Хліб'], ['croissant', 'Випічка'],
+    ['candy', 'Солодке'], ['cookie', 'Печиво'], ['cake', 'Торт'], ['ice-cream-cone', 'Морозиво'],
+    ['utensils', 'Ресторан'], ['cook', 'Кухня'], ['chef-hat', 'Кулінарія'], ['soup', 'Суп'],
+    ['salad', 'Салат'], ['pizza', 'Піца'], ['sandwich', 'Фастфуд'], ['coffee', 'Кава'],
+    ['cup-soda', 'Напої'], ['wine', 'Вино'], ['beer', 'Пиво'], ['martini', 'Бар'],
+  ] },
+  { title: 'Дім і комуналка', icons: [
+    ['house', 'Дім'], ['building', 'Квартира'], ['key', 'Оренда'], ['sofa', 'Меблі'],
+    ['bed', 'Спальня'], ['lamp', 'Світло'], ['plug', 'Електрика'], ['zap', 'Енергія'],
+    ['flame', 'Газ'], ['droplet', 'Вода'], ['thermometer', 'Опалення'], ['wifi', 'Інтернет'],
+    ['phone', 'Телефон'], ['smartphone', 'Мобільний'], ['tv', 'ТБ'], ['router', 'Роутер'],
+    ['washing-machine', 'Пральна'], ['refrigerator', 'Холодильник'], ['microwave', 'Техніка'], ['bath', 'Ванна'],
+    ['spray-can', 'Побутова хімія'], ['trash-2', 'Вивіз сміття'], ['hammer', 'Ремонт'], ['wrench', 'Майстер'],
+    ['tool', 'Інструменти'], ['drill', 'Дриль'], ['paint-roller', 'Фарба'], ['archive', 'Зберігання'],
+    ['box', 'Посилки'], ['novaposhta', 'Нова пошта'], ['plant', 'Рослини'], ['sprout', 'Город'],
+    ['flower', 'Квіти'], ['shovel', 'Дача'],
+  ] },
+  { title: 'Транспорт', icons: [
+    ['car', 'Авто'], ['fuel', 'Пальне'], ['circle-parking', 'Паркування'], ['car-front', 'Мийка'],
+    ['cog', 'СТО'], ['gauge', 'Техогляд'], ['shield-check', 'Страховка'], ['bus', 'Автобус'],
+    ['tram-front', 'Трамвай'], ['train-front', 'Потяг'], ['car-taxi-front', 'Таксі'], ['bike', 'Велосипед'],
+    ['plane', 'Літак'], ['ship', 'Пором'], ['truck', 'Доставка'],
+    ['caravan', 'Автодім'], ['route', 'Дорога'],
+  ] },
+  { title: "Здоров'я й краса", icons: [
+    ['heart', "Здоров'я"], ['heart-pulse', 'Кардіо'], ['pill', 'Ліки'], ['briefcase-medical', 'Аптечка'],
+    ['stethoscope', 'Лікар'], ['hospital', 'Лікарня'], ['syringe', 'Щеплення'], ['smile-plus', 'Стоматолог'],
+    ['eye', 'Окуліст'], ['glasses', 'Окуляри'], ['brain', 'Психолог'], ['dumbbell', 'Зал'],
+    ['biceps-flexed', 'Тренування'], ['run', 'Біг'], ['swim', 'Басейн'], ['ball', 'Спорт'],
+    ['scissors', 'Перукар'], ['sparkles', 'Косметика'], ['flower-2', 'Спа'], ['hand', 'Манікюр'],
+  ] },
+  { title: 'Одяг і покупки', icons: [
+    ['shirt', 'Одяг'], ['footprints', 'Взуття'], ['shopping-bag', 'Шопінг'], ['gem', 'Прикраси'],
+    ['watch', 'Годинник'], ['umbrella', 'Парасоля'], ['backpack', 'Рюкзак'],
+    ['package', 'Замовлення'], ['tag', 'Розпродаж'], ['monitor', "Комп'ютер"], ['tablet', 'Планшет'],
+    ['headphones', 'Навушники'], ['camera', 'Фото'], ['gamepad-2', 'Приставка'], ['printer', 'Принтер'],
+  ] },
+  { title: 'Дозвілля й хобі', icons: [
+    ['film', 'Кіно'], ['popcorn', 'Попкорн'], ['tickets', 'Квитки'], ['drama', 'Театр'],
+    ['music', 'Музика'], ['piano', 'Інструменти'], ['mic', 'Караоке'], ['game', 'Ігри'],
+    ['dice', 'Настолки'], ['chess', 'Шахи'], ['puzzle', 'Пазли'], ['book', 'Книги'],
+    ['book-open', 'Читання'], ['palette', 'Творчість'], ['brush', 'Малювання'], ['party-popper', 'Свята'],
+    ['cake-slice', 'День народження'], ['target', 'Стрільба'], ['crosshair', 'Патрони'], ['binoculars', 'Оптика'],
+    ['tent', 'Похід'], ['tent-tree', 'Табір'], ['fish-symbol', 'Риболовля'], ['mountain', 'Гори'],
+    ['luggage', 'Відпустка'], ['map', 'Подорожі'], ['map-pin', 'Місця'], ['hotel', 'Готель'],
+    ['tree-palm', 'Море'],
+  ] },
+  { title: 'Освіта й робота', icons: [
+    ['graduation-cap', 'Навчання'], ['school', 'Школа'], ['notebook-pen', 'Канцелярія'], ['languages', 'Мови'],
+    ['code', 'Курси'], ['globe', 'Сервіси'], ['cloud', 'Хмара'], ['server', 'Хостинг'],
+    ['calendar', 'Події'], ['file-text', 'Документи'], ['stamp', 'Нотаріус'], ['gavel', 'Юрист'],
+    ['printer-check', 'Друк'], ['mail', 'Пошта'],
+  ] },
+  { title: 'Люди й тварини', icons: [
+    ['users', "Сім'я"], ['baby', 'Діти'], ['user', 'Я'], ['user-round', 'Вона'],
+    ['smile', 'Друзі'], ['hand-heart', 'Допомога'], ['hand-helping', 'Волонтерство'], ['shield', 'ЗСУ'],
+    ['church', 'Церква'], ['paw', 'Тварини'], ['cat', 'Кіт'], ['dog', 'Пес'],
+    ['bird', 'Птахи'], ['bone', 'Корм'],
+  ] },
+  { title: 'Інше', icons: [
+    ['star', 'Зірка'], ['heart-handshake', 'Подяка'], ['bell', 'Нагадування'], ['clock', 'Час'],
+    ['flag', 'Прапор'], ['bookmark', 'Закладка'], ['circle-help', 'Невідоме'], ['cigarette', 'Цигарки'],
+    ['skull', 'Шкідливе'], ['dices', 'Азарт'], ['ghost', 'Втрачене'], ['rocket', 'Мрія'],
+  ] },
 ];
 
 /**
