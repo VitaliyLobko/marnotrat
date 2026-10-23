@@ -465,3 +465,24 @@ button.amt-end.on { background: var(--surface-2); }
 .pick-coin { display: grid; justify-items: center; gap: 4px; padding: 6px 2px; border: 0; border-radius: 12px; background: none; color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
 .pick-coin > span:last-child { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pick-coin.on { background: var(--surface-2); box-shadow: inset 0 0 0 2px var(--brand); }
+
+/* фільтри звіту */
+.filter-form { gap: 0; }
+.filter-head { margin: 14px 0 4px; color: var(--brand); font-weight: 600; font-size: 15px; }
+.check-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 4px 0; border-bottom: 1px solid var(--line); font-size: 16px; }
+.check-row input[type="checkbox"] { width: 22px; height: 22px; accent-color: var(--brand); }
+.check-row input[type="date"] { width: auto; max-width: 60%; }
+.filter-form .btn-grid { margin-top: 16px; }
+.icon-btn.has-dot { position: relative; }
+.icon-btn.has-dot::after { content: ''; position: absolute; top: 8px; right: 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 0 2px var(--brand); }
+.topbar .icon-btn.on { background: rgb(255 255 255 / .22); border-radius: 50%; }
+
+/* групи іконок згортаються */
+details.icon-group { border-bottom: 1px solid var(--line); }
+details.icon-group > summary { display: flex; align-items: center; gap: 8px; margin: 0; padding: 10px 2px; cursor: pointer; list-style: none; }
+details.icon-group > summary::-webkit-details-marker { display: none; }
+details.icon-group > summary::after { content: '›'; margin-left: auto; font-size: 18px; line-height: 1; transition: rotate .15s; }
+details.icon-group[open] > summary::after { rotate: 90deg; }
+.icon-group-count { color: var(--muted); font-weight: 400; }
+details.icon-group > .icon-row { padding-bottom: 10px; }
+.icon-groups { gap: 0; overflow-x: hidden; }

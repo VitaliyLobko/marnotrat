@@ -1,5 +1,7 @@
 // Лінійні іконки 24×24: колір і товщину задає CSS (stroke: currentColor).
 export const ICONS = {
+  // звіт: фільтр
+  filter: '<path d="M4 5h16l-6 7.5V19l-4 1.5v-8z"/>',
   // заняття
   book: '<path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3z"/><path d="M5 17a3 3 0 0 1 3-3h11"/>',
   code: '<path d="M8 8l-4 4 4 4M16 8l4 4-4 4M13.5 5l-3 14"/>',

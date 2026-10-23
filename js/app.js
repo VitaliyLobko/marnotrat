@@ -14,6 +14,9 @@ let feedDays = 60;
 let reportKind = 'expense';
 let reportMonth = M.monthOf(M.ymd());
 let reportPick = null;
+// Звіт «Загальний»: свій період і рахунки (фільтр), розбивка за тегами замість монет
+const reportFilter = { from: '', to: '', accounts: null };
+let reportTags = false;
 let dayDate = M.ymd();
 // Оновлення застосунку: реєстрація service worker і нова версія, що чекає
 const upd = { reg: null, worker: null, checked: '' };
@@ -828,10 +831,50 @@ function viewFeed() {
 
 const SLOTS = 7;
 
-/** Частки за місяць: [{ c, v, color }] за спаданням; понад 7 — у «Інше». */
-function reportParts(kind, ym) {
-  const list = state.coins.filter((c) => c.kind === kind)
-    .map((c) => ({ c, v: kind === 'expense' ? toUah(monthSpent(c, ym), c.currency) : toUah(monthIncome(c, ym), c.currency) }))
+const customPeriod = () => Boolean(reportFilter.from || reportFilter.to);
+const firstOpDate = () => state.ops.reduce((m, op) => (op.date < m ? op.date : m), M.ymd());
+
+/** Межі звіту: свій період з фільтра або місяць, що гортається. Дати — рядки «РРРР-ММ-ДД», порівнюються як рядки. */
+function reportRange() {
+  if (customPeriod()) return [reportFilter.from || firstOpDate(), reportFilter.to || M.ymd()];
+  return [`${reportMonth}-01`, `${reportMonth}-31`];
+}
+
+const dmy = (date) => `${date.slice(8, 10)}.${date.slice(5, 7)}.${date.slice(0, 4)}`;
+// У центр кільця — коротше: рік один раз, якщо він спільний
+function shortRange() {
+  const [lo, hi] = reportRange();
+  return lo.slice(0, 4) === hi.slice(0, 4) ? `${dmy(lo).slice(0, 5)} – ${dmy(hi)}` : `${dmy(lo)} – ${dmy(hi)}`;
+}
+const reportTitle = () => (customPeriod() ? reportRange().map(dmy).join(' – ') : M.monthTitle(reportMonth));
+
+/** Операції звіту в гривнях: потрібного типу, у межах періоду, з вибраних рахунків. */
+function reportItems(kind) {
+  const [lo, hi] = reportRange();
+  const out = [];
+  for (const op of state.ops) {
+    if (op.date < lo || op.date > hi || opType(op) !== kind) continue;
+    // Рахунок, з якого витрачено чи на який прийшов дохід
+    const acc = kind === 'expense' ? op.from : op.to;
+    if (reportFilter.accounts && !reportFilter.accounts.includes(acc)) continue;
+    const c = coinOr(kind === 'expense' ? op.to : op.from);
+    out.push({ op, c, v: kind === 'expense' ? toUah(amountIn(op), c.currency) : toUah(op.amount, c.currency) });
+  }
+  return out;
+}
+
+/**
+ * Частки звіту: [{ c, v, color }] за спаданням; понад 7 — у «Інше».
+ * За тегами: операція з кількома тегами йде в кожен, без тегів — у «Без тегу».
+ */
+function reportParts(kind) {
+  const sums = new Map();
+  for (const { op, c, v } of reportItems(kind)) {
+    const keys = reportTags ? (op.tags?.length ? op.tags : ['']) : [c.id];
+    for (const k of keys) sums.set(k, (sums.get(k) ?? 0) + v);
+  }
+  const list = [...sums]
+    .map(([k, v]) => ({ c: reportTags ? { id: `tag:${k}`, name: k ? `#${k}` : 'Без тегу', tag: k } : coinOr(k), v }))
     .filter((x) => x.v > 0).sort((a, b) => b.v - a.v);
   const top = list.slice(0, SLOTS).map((x, i) => ({ ...x, color: `var(--s${i + 1})` }));
   const rest = list.slice(SLOTS);
@@ -904,28 +947,86 @@ function periodNav(title, step) {
 }
 
 function viewReport() {
-  const parts = reportParts(reportKind, reportMonth);
+  const parts = reportParts(reportKind);
   const total = parts.reduce((s, p) => s + p.v, 0);
+  // Справжня сума: за тегами операція з кількома тегами рахується в частках кілька разів, у підсумку — раз
+  const real = reportItems(reportKind).reduce((s, x) => s + x.v, 0);
   const picked = parts.find((p) => p.c.id === reportPick);
   const stepMonth = (n) => { reportMonth = M.addMonths(reportMonth, n); reportPick = null; render(); return true; };
+  const custom = customPeriod();
+  const nav = custom
+    ? h('div', { class: 'period' },
+      h('h2', {}, reportTitle()),
+      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Повернутись до місяців', onClick: () => { reportFilter.from = ''; reportFilter.to = ''; reportPick = null; render(); } }, icon('close')))
+    : periodNav(reportTitle(), stepMonth);
+  const what = reportKind === 'expense' ? 'витрат' : 'доходів';
   const body = h('div', { class: 'page stack' },
-    periodNav(M.monthTitle(reportMonth), stepMonth),
+    nav,
     total ? donut(parts, total, picked
       ? [h('span', {}, picked.c.name), h('b', {}, M.money(picked.v)), h('span', {}, `${Math.round((picked.v / total) * 100)}%`)]
-      : [h('span', {}, M.monthTitle(reportMonth)), h('b', {}, M.money(total))])
-      : h('p', { class: 'empty' }, reportKind === 'expense' ? 'Цього місяця витрат немає' : 'Цього місяця доходів немає'),
+      : [h('span', {}, custom ? shortRange() : M.monthTitle(reportMonth)), h('b', {}, M.money(real))])
+      : h('p', { class: 'empty' }, custom ? `За цей період ${what} немає` : `Цього місяця ${what} немає`),
     total ? h('div', { class: 'card' }, parts.map((p) => h('button', {
       type: 'button', class: `rep-row${reportPick === p.c.id ? ' on' : ''}`,
-      onClick: () => { if (p.rest) { reportPick = reportPick === p.c.id ? null : p.c.id; render(); } else openFeed(p.c.id); },
+      onClick: () => {
+        // Тег і «Інше» — підсвітити в кільці; монета — її стрічка
+        if (p.rest || reportTags) { reportPick = reportPick === p.c.id ? null : p.c.id; render(); } else openFeed(p.c.id);
+      },
     },
     h('span', { class: 'rep-dot', style: { background: p.color } }),
     h('span', { class: 'rep-name' }, p.c.name),
     h('span', { class: 'rep-pct' }, `${Math.round((p.v / total) * 100)}%`),
     h('span', { class: 'rep-sum' }, M.money(p.v))))) : null);
-  swipeStep(body, stepMonth);
+  if (!custom) swipeStep(body, stepMonth);
   const tab = (k, label) => h('button', { type: 'button', class: reportKind === k ? 'on' : '', onClick: () => { reportKind = k; reportPick = null; render(); } }, label);
   return h('div', {}, h('div', { class: 'tabs-bar' }, tab('expense', 'Витрати'), tab('income', 'Доходи')), body);
 }
+
+/** Фільтри звіту: свій період (початок і кінець) і рахунки, з яких рахувати. */
+function openReportFilter() {
+  const accs = state.coins.filter((c) => c.kind === 'account' && !c.archived).sort((a, b) => a.order - b.order);
+  const [lo, hi] = reportRange();
+  const from = h('input', { type: 'date', class: 'field', value: lo, max: M.ymd(), 'aria-label': 'Початок' });
+  const to = h('input', { type: 'date', class: 'field', value: hi > M.ymd() ? M.ymd() : hi, 'aria-label': 'Кінець' });
+  const chosen = new Set(reportFilter.accounts ?? accs.map((c) => c.id));
+  const boxes = accs.map((c) => h('input', { type: 'checkbox', checked: chosen.has(c.id), 'data-id': c.id }));
+  const all = h('input', { type: 'checkbox', checked: chosen.size === accs.length });
+  all.addEventListener('change', () => { for (const b of boxes) b.checked = all.checked; });
+  for (const b of boxes) b.addEventListener('change', () => { all.checked = boxes.every((x) => x.checked); });
+  const row = (label, box) => h('label', { class: 'check-row' }, h('span', {}, label), box);
+  const apply = () => {
+    const ids = boxes.filter((b) => b.checked).map((b) => b.dataset.id);
+    if (!ids.length) { toast('Вибери хоча б один рахунок'); return; }
+    // Дати не чіпали — лишаємо гортання місяцями
+    if (from.value !== lo || to.value !== (hi > M.ymd() ? M.ymd() : hi)) {
+      reportFilter.from = from.value || '';
+      reportFilter.to = to.value || '';
+      if (reportFilter.from && reportFilter.to && reportFilter.from > reportFilter.to) [reportFilter.from, reportFilter.to] = [reportFilter.to, reportFilter.from];
+    }
+    reportFilter.accounts = ids.length === accs.length ? null : ids;
+    reportPick = null;
+    closeSheet();
+    render();
+  };
+  const reset = () => {
+    Object.assign(reportFilter, { from: '', to: '', accounts: null });
+    reportPick = null;
+    closeSheet();
+    render();
+  };
+  sheet('Фільтри', h('div', { class: 'form filter-form' },
+    h('p', { class: 'filter-head' }, 'Звітний період'),
+    h('label', { class: 'check-row' }, h('span', {}, 'Початок'), from),
+    h('label', { class: 'check-row' }, h('span', {}, 'Кінець'), to),
+    h('p', { class: 'filter-head' }, 'Рахунки'),
+    row('Вибрати всі', all),
+    accs.map((c, i) => row(c.name, boxes[i])),
+    h('div', { class: 'btn-grid' },
+      h('button', { type: 'button', class: 'btn', onClick: reset }, icon('undo'), 'Скинути'),
+      h('button', { type: 'button', class: 'btn primary', onClick: apply }, icon('check'), 'Готово'))));
+}
+
+const filterOn = () => customPeriod() || Boolean(reportFilter.accounts);
 
 function viewDays() {
   const step = (n) => { dayDate = M.addDays(dayDate, n); render(); return true; };
@@ -981,8 +1082,12 @@ function iconPicker(d) {
       buttons.push(b);
       row.append(b);
     }
-    const el = h('div', { class: 'icon-group' }, h('p', { class: 'icon-group-title' }, g.title), row);
+    // Групи згорнуті; розгорнута та, де поточна іконка
+    const mine = g.icons.some(([k]) => k === d.icon);
+    const el = h('details', { class: 'icon-group', open: mine },
+      h('summary', { class: 'icon-group-title' }, h('span', {}, g.title), h('span', { class: 'icon-group-count' }, String(row.childElementCount))), row);
     el.dataset.find = searchKey(g.title);
+    el.dataset.mine = mine ? '1' : '';
     return el;
   });
   const empty = h('p', { class: 'muted small', hidden: true }, 'Нічого не знайдено');
@@ -997,6 +1102,8 @@ function iconPicker(d) {
         if (!b.hidden) inGroup += 1;
       }
       g.hidden = inGroup === 0;
+      // Під час пошуку знайдене видно одразу; порожній пошук — згорнути назад
+      g.open = q ? inGroup > 0 : g.dataset.mine === '1';
       shown += inGroup;
     }
     empty.hidden = shown > 0;
@@ -1367,7 +1474,14 @@ function topbar() {
   bar.className = 'topbar brand';
   bar.replaceChildren(
     h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Назад', onClick: () => (history.length > 1 ? history.back() : go('main')) }, icon('back')),
-    h('h1', {}, typeof title === 'function' ? title() : title));
+    h('h1', {}, typeof title === 'function' ? title() : title),
+    view === 'report' ? h('button', {
+      type: 'button', class: `icon-btn${filterOn() ? ' has-dot' : ''}`, 'aria-label': filterOn() ? 'Фільтри (увімкнено)' : 'Фільтри', onClick: openReportFilter,
+    }, icon('filter')) : null,
+    view === 'report' ? h('button', {
+      type: 'button', class: `icon-btn${reportTags ? ' on' : ''}`, 'aria-pressed': String(reportTags), 'aria-label': 'За тегами',
+      onClick: () => { reportTags = !reportTags; reportPick = null; toast(reportTags ? 'Звіт за тегами' : 'Звіт за монетами'); render(); },
+    }, icon('tag')) : null);
 }
 
 // Підпис монети, що не влазить у рядок, — дрібніше рівно настільки, щоб влізти, але не менше 9px

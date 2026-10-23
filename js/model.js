@@ -34,7 +34,7 @@ export const monthTitle = (ym) => `${MONTHS[Number(ym.slice(5, 7)) - 1]} ${ym.sl
 /** «23 жовтня 2026» */
 export const dateTitle = (date) => `${Number(date.slice(8, 10))} ${MONTHS_GEN[Number(date.slice(5, 7)) - 1]} ${date.slice(0, 4)}`;
 
-/** Заголовок дня в стрічці, як у CoinKeeper: «СЬОГОДНІ, 23 жовтня», «ВЧОРА, …», «ПН, 12 жовтня»; інший рік — з роком. */
+/** Заголовок дня в стрічці: «СЬОГОДНІ, 23 жовтня», «ВЧОРА, …», «ПН, 12 жовтня»; інший рік — з роком. */
 export function dayHead(date, today = ymd()) {
   const day = `${Number(date.slice(8, 10))} ${MONTHS_GEN[Number(date.slice(5, 7)) - 1]}`;
   const tail = date.slice(0, 4) === today.slice(0, 4) ? day : `${day} ${date.slice(0, 4)}`;
