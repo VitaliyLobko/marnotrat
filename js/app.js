@@ -176,17 +176,18 @@ function monthIncome(c, ym) {
 }
 
 /** Як операція міняє гроші на рахунках, у гривнях: дохід +, витрата −, переказ — лише різниця курсів. */
+// Що входить у «Баланс»: рахунки й борги з позначкою «враховувати»; ціль — відкладене, не входить
+const inBalance = (c) => c.kind === 'account' || (c.kind === 'debt' && Boolean(c.inBalance));
+
 function accDelta(op) {
-  // Рахується лише те, що на рахунках: ціль — відкладене, у «Баланс» не входить
   const src = coinOr(op.from);
   const dst = coinOr(op.to);
   let v = 0;
-  if (dst.kind === 'account') v += toUah(amountIn(op), dst.currency);
-  if (src.kind === 'account') v -= toUah(op.amount, src.currency);
+  if (inBalance(dst)) v += toUah(amountIn(op), dst.currency);
+  if (inBalance(src)) v -= toUah(op.amount, src.currency);
   return v;
 }
 
-/** Витрати й доходи за період у гривнях (date — день чи місяць «2026-10»). */
 /** Витрати й доходи в гривнях: за день («РРРР-ММ-ДД») чи за період обліку (ключ «РРРР-ММ»). */
 function totals(key) {
   let expense = 0;
@@ -201,8 +202,7 @@ function totals(key) {
   return { expense, income };
 }
 
-const totalBalance = () => coinsOf('account').reduce((s, a) => s + toUah(balance(a), a.currency), 0)
-  + state.coins.filter((c) => c.kind === 'account' && c.archived).reduce((s, a) => s + toUah(balance(a), a.currency), 0);
+const totalBalance = () => state.coins.filter(inBalance).reduce((s, a) => s + toUah(balance(a), a.currency), 0);
 
 // ---------- головна ----------
 
@@ -270,6 +270,14 @@ function coinEl(c, ym) {
     if (c.budget) sub = M.num(c.budget);
   } else if (c.kind === 'account') {
     sum = balance(c);
+  } else if (c.kind === 'debt') {
+    // Борг: плюс — винні мені, мінус — винен я; сума без знака, напрям — кольором і підписом
+    const bal = balance(c);
+    sum = Math.abs(bal);
+    st = bal > 0 ? 'owed' : bal < 0 ? 'owe' : 'closed';
+    const late = bal !== 0 && c.due && c.due <= M.ymd();
+    sub = `${bal > 0 ? 'винні мені' : bal < 0 ? 'я винен' : 'повернуто'}${bal !== 0 && c.due ? ` · ${late ? 'час!' : `до ${c.due.slice(8, 10)}.${c.due.slice(5, 7)}`}` : ''}`;
+    if (late) st += ' late';
   } else if (c.kind === 'goal') {
     // Ціль: відкладено / скільки треба; кільце — частка зібраного
     sum = balance(c);
@@ -346,9 +354,17 @@ function pager(key, items, perPage, cls) {
 
 /** Рядок на головній: заплановані повтори, яким уже пора, — тап веде в стрічку. */
 function planHint() {
+  if (editing()) return null;
   const n = dueCount();
-  if (!n || editing()) return null;
-  return h('button', { type: 'button', class: 'plan-hint', onClick: () => go('feed') }, icon('refresh'), `До проведення: ${n}`, icon('next'));
+  // Борги, яким настав строк і які ще не закриті
+  const late = coinsOf('debt').filter((c) => c.due && c.due <= M.ymd() && Math.abs(balance(c)) >= 0.01);
+  const rows = late.map((c) => {
+    const bal = balance(c);
+    return h('button', { type: 'button', class: 'plan-hint debt', onClick: () => openFeed(c.id) }, icon('handshake'),
+      `${c.name}: ${bal > 0 ? 'час повернути тобі' : 'час віддати'} ${M.money(Math.abs(bal), c.currency)}`, icon('next'));
+  });
+  if (n) rows.unshift(h('button', { type: 'button', class: 'plan-hint', onClick: () => go('feed') }, icon('refresh'), `До проведення: ${n}`, icon('next')));
+  return rows.length ? rows : null;
 }
 
 function viewMain() {
@@ -358,7 +374,8 @@ function viewMain() {
   const grid = state.coins.filter((c) => (c.kind === 'expense' || c.kind === 'goal') && !c.archived).sort((a, b) => a.order - b.order);
   return h('div', { class: `main${editing() ? ' editing' : ''}` },
     incomeOpen ? pager('income', [...coinsOf('income').map((c) => coinEl(c, ym)), addCoinEl('income')], 4, 'coin-row incomes') : null,
-    pager('account', [...coinsOf('account').map((c) => coinEl(c, ym)), addCoinEl('account')], 4, 'coin-row accounts'),
+    pager('account', [...state.coins.filter((c) => (c.kind === 'account' || c.kind === 'debt') && !c.archived)
+      .sort((a, b) => a.order - b.order).map((c) => coinEl(c, ym)), addCoinEl('account')], 4, 'coin-row accounts'),
     planHint(),
     pager('expense', [...grid.map((c) => coinEl(c, ym)), addCoinEl('expense')], 16, 'expenses'),
     state.ops.length ? null : h('p', { class: 'muted small main-hint' },
@@ -371,14 +388,16 @@ function viewMain() {
 function canDrop(src, dst) {
   if (!dst || src.id === dst.id) return false;
   if (src.kind === 'income') return dst.kind === 'account';
-  if (src.kind === 'account') return dst.kind === 'account' || dst.kind === 'expense' || dst.kind === 'goal';
+  if (src.kind === 'account') return dst.kind === 'account' || dst.kind === 'expense' || dst.kind === 'goal' || dst.kind === 'debt';
+  // Борг → рахунок: позичив у когось чи тобі повернули
+  if (src.kind === 'debt') return dst.kind === 'account';
   // З цілі — назад на рахунок
   if (src.kind === 'goal') return dst.kind === 'account';
   return false;
 }
 
 // Ряд, у якому монету можна переставити: цілі стоять разом із витратами
-const rowOf = (c) => (c.kind === 'goal' ? 'expense' : c.kind);
+const rowOf = (c) => (c.kind === 'goal' ? 'expense' : c.kind === 'debt' ? 'account' : c.kind);
 const canReorder = (src, dst) => Boolean(dst) && src.id !== dst.id && rowOf(src) === rowOf(dst);
 
 /** Перестановка: монета стає на місце тієї, на яку її кинули; решта ряду зсувається. */
@@ -1286,8 +1305,9 @@ function viewDays() {
 
 // ---------- редагування монети ----------
 
-const NEW_ICON = { account: 'wallet', income: 'banknote', expense: 'shopping-cart', goal: 'piggy-bank' };
+const NEW_ICON = { account: 'wallet', income: 'banknote', expense: 'shopping-cart', goal: 'piggy-bank', debt: 'handshake' };
 const GRID_KINDS = [['expense', 'Витрата'], ['goal', 'Ціль']];
+const ROW_KINDS = [['account', 'Рахунок'], ['debt', 'Борг']];
 
 // Пошук без різниці між великими літерами й видами апострофа
 const searchKey = (s) => s.toLocaleLowerCase('uk').replace(/[’ʼ`]/g, "'").trim();
@@ -1357,10 +1377,25 @@ function editCoin(orig, kind = orig?.kind) {
   const startLabel = kind === 'goal' ? 'Уже відкладено' : 'Залишок зараз';
   const start = amountField(orig ? balance(orig) : 0, startLabel);
   const grid = iconPicker(d);
+  // Борг: напрям і сума зараз, дата повернення, чи входить у «Баланс»
+  const debt = kind === 'debt';
+  const debtNow = orig && debt ? balance(orig) : 0;
+  const dir = { v: debtNow < 0 ? 'owe' : 'owed' };
+  const debtSum = amountField(Math.abs(debtNow), 'Сума боргу зараз');
+  const due = h('input', { type: 'date', class: 'field', value: d.due ?? '', 'aria-label': 'Повернути до' });
+  const counted = h('input', { type: 'checkbox', checked: Boolean(d.inBalance) });
   const store = async () => {
     const rec = { ...d, name: name.value.trim() };
-    if (!rec.name) { toast('Дай назву'); return; }
+    if (!rec.name) { toast(debt ? 'Напиши, хто' : 'Дай назву'); return; }
     rec.budget = Math.max(0, Number(budget.value) || 0);
+    if (debt) {
+      rec.budget = 0;
+      rec.due = due.value || '';
+      rec.inBalance = counted.checked;
+      // Як у рахунку: «скільки зараз» → стартовий залишок, операції не чіпаємо
+      const now = (dir.v === 'owe' ? -1 : 1) * (Number(debtSum.value) || 0);
+      rec.start = M.round2((d.start || 0) + now - debtNow);
+    }
     if (holds) {
       // Залишок задають «скільки зараз»: різницю переносимо в стартовий, операції не чіпаємо
       const now = Number(start.value) || 0;
@@ -1377,10 +1412,19 @@ function editCoin(orig, kind = orig?.kind) {
     // Нова монета в сітці витрат: витрата чи ціль — інший тип перемальовує форму
     !orig && (kind === 'expense' || kind === 'goal')
       ? [h('p', { class: 'flabel' }, 'Тип'), chips(GRID_KINDS, kind, (v) => { if (v !== kind) editCoin(null, v); })] : null,
+    !orig && (kind === 'account' || kind === 'debt')
+      ? [h('p', { class: 'flabel' }, 'Тип'), chips(ROW_KINDS, kind, (v) => { if (v !== kind) editCoin(null, v); })] : null,
     kind === 'goal' ? h('p', { class: 'muted small' }, 'Відкладене: гроші з рахунку переносиш сюди перетягуванням. У «Баланс» і у витрати не входять.') : null,
-    h('label', { class: 'flabel' }, 'Назва'), name,
+    debt ? h('p', { class: 'muted small' }, 'Дав у борг — тягни рахунок на цю монету; позичив чи тобі повертають — тягни її на рахунок. Ні витратою, ні доходом це не рахується.') : null,
+    h('label', { class: 'flabel' }, debt ? 'Хто' : 'Назва'), name,
     kind !== 'expense' || !used ? [h('p', { class: 'flabel' }, 'Валюта'), chips(M.CURRENCIES, d.currency, (v) => { d.currency = v; })] : null,
-    kind !== 'account' ? [h('label', { class: 'flabel' }, budgetLabel), budget] : null,
+    debt ? [
+      h('p', { class: 'flabel' }, 'Зараз'), chips([['owed', 'Мені винні'], ['owe', 'Я винен']], dir.v, (v) => { dir.v = v; }),
+      h('label', { class: 'flabel' }, 'Сума боргу зараз (0 — почнеш з перетягування)'), debtSum,
+      h('label', { class: 'flabel' }, 'Повернути до (не обов’язково)'), due,
+      h('label', { class: 'check-row' }, h('span', {}, 'Враховувати в «Баланс»'), counted),
+    ] : null,
+    kind !== 'account' && !debt ? [h('label', { class: 'flabel' }, budgetLabel), budget] : null,
     holds ? [h('label', { class: 'flabel' }, startLabel), start] : null,
     h('p', { class: 'flabel' }, 'Іконка'), grid,
     h('div', { class: 'btn-grid' },

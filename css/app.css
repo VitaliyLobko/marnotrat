@@ -164,7 +164,7 @@ a { color: var(--brand); }
 }
 /* витрату гортають в обидва боки; рахунок, дохід і ціль — лише вбік: рух униз чи навскіс уже перетягування */
 .k-expense .coin-face { touch-action: pan-x pan-y; }
-.k-income .coin-face, .k-account .coin-face, .k-goal .coin-face { touch-action: pan-x; }
+.k-income .coin-face, .k-account .coin-face, .k-goal .coin-face, .k-debt .coin-face { touch-action: pan-x; }
 .coin-face .coin-ico { position: relative; z-index: 1; }
 /* іконка — близько половини монети, тонкою лінією */
 .coin-face .coin-ico { width: 50%; }
@@ -515,3 +515,15 @@ details.icon-group > .icon-row { padding-bottom: 10px; }
 .feed-tools .chips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
 .feed-found { display: flex; justify-content: space-between; margin: 0 4px; color: var(--muted); font-size: 14px; }
 .feed-found b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* борг: сіра монета з обідком — зелений «винні мені», червоний «я винен», закритий — тьмяний */
+.k-debt .coin-face { background: var(--coin-empty); box-shadow: inset 0 0 0 5px var(--line); }
+.k-debt.st-owed .coin-face { box-shadow: inset 0 0 0 5px var(--plus); }
+.k-debt.st-owe .coin-face { box-shadow: inset 0 0 0 5px var(--minus); }
+.k-debt.st-closed .coin-face { opacity: .55; }
+.k-debt.st-owed .coin-sum { color: var(--plus); }
+.k-debt.st-owe .coin-sum { color: var(--minus); }
+.k-debt.st-closed .coin-sum { color: var(--muted); }
+.k-debt.late .coin-sub { color: var(--warn-ink); font-weight: 700; }
+.mini-coin.k-debt { background: var(--coin-empty); box-shadow: inset 0 0 0 2px var(--muted); }
+.plan-hint.debt .ico:first-child { color: var(--warn); }
