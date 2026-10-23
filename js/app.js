@@ -12,6 +12,7 @@ let view = 'main';
 let feedCoin = null;
 let feedDays = 60;
 let reportKind = 'expense';
+// Період звіту — ключ «РРРР-ММ» місяця, у якому він починається (див. periodOf); стан ще не завантажено — календарний
 let reportMonth = M.monthOf(M.ymd());
 let reportPick = null;
 // Звіт «Загальний»: свій період і рахунки (фільтр), розбивка за тегами замість монет
@@ -122,7 +123,46 @@ function balance(acc) {
   return M.round2(v);
 }
 
-const inMonth = (op, ym) => op.date.startsWith(ym);
+// ---------- період обліку: місяць від дня N (наприклад, від зарплати) ----------
+
+/** День, з якого починається обліковий місяць: 1–28, у meta — спільний для всіх телефонів. */
+const startDay = () => state.meta.find((m) => m.id === 'period')?.day ?? 1;
+const dd = (n) => String(n).padStart(2, '0');
+
+/** Ключ періоду для дати: місяць, у якому період почався. День 1 — звичайний календарний місяць. */
+function periodOf(date) {
+  const ym = M.monthOf(date);
+  return Number(date.slice(8, 10)) >= startDay() ? ym : M.addMonths(ym, -1);
+}
+
+/** Межі періоду включно: з N-го цього місяця до (N−1)-го наступного. */
+function periodRange(ym) {
+  const n = startDay();
+  return [`${ym}-${dd(n)}`, M.addDays(`${M.addMonths(ym, 1)}-${dd(n)}`, -1)];
+}
+
+const currentPeriod = () => periodOf(M.ymd());
+
+/** «жовтень 2026» для календарного місяця; зі свого дня — «05.10 – 04.11.2026». */
+function periodTitle(ym) {
+  if (startDay() === 1) return M.monthTitle(ym);
+  const [lo, hi] = periodRange(ym);
+  const f = (x) => `${x.slice(8, 10)}.${x.slice(5, 7)}`;
+  return `${f(lo)} – ${f(hi)}.${hi.slice(0, 4)}`;
+}
+
+/** Яка частка періоду минула на кінець сьогоднішнього дня. */
+function periodElapsed(ym) {
+  const [lo, hi] = periodRange(ym);
+  const day = 24 * 60 * 60 * 1000;
+  const len = (M.parseYmd(hi) - M.parseYmd(lo)) / day + 1;
+  return Math.min(1, Math.round((M.parseYmd(M.ymd()) - M.parseYmd(lo)) / day + 1) / Math.round(len));
+}
+
+const inMonth = (op, ym) => {
+  const [lo, hi] = periodRange(ym);
+  return op.date >= lo && op.date <= hi;
+};
 
 function monthSpent(c, ym) {
   return state.ops.reduce((s, op) => (op.to === c.id && inMonth(op, ym) ? s + amountIn(op) : s), 0);
@@ -144,11 +184,13 @@ function accDelta(op) {
 }
 
 /** Витрати й доходи за період у гривнях (date — день чи місяць «2026-10»). */
-function totals(prefix) {
+/** Витрати й доходи в гривнях: за день («РРРР-ММ-ДД») чи за період обліку (ключ «РРРР-ММ»). */
+function totals(key) {
   let expense = 0;
   let income = 0;
+  const hit = key.length === 7 ? (op) => inMonth(op, key) : (op) => op.date === key;
   for (const op of state.ops) {
-    if (!op.date.startsWith(prefix)) continue;
+    if (!hit(op)) continue;
     const t = opType(op);
     if (t === 'expense') expense += toUah(amountIn(op), coinOr(op.to).currency);
     else if (t === 'income') income += toUah(op.amount, coinOr(op.from).currency);
@@ -167,7 +209,7 @@ const planTotal = () => state.coins
   .reduce((s, c) => s + toUah(c.budget, c.currency), 0);
 
 function headStats() {
-  const { expense, income } = totals(M.monthOf(M.ymd()));
+  const { expense, income } = totals(currentPeriod());
   const plan = planTotal();
   // Підсумки в гривнях — без копійок: долари за курсом дають «54 451,10». Тап — куди дивитись далі
   const stat = (label, v, onClick, cls = '') => h('button', { type: 'button', class: 'stat', onClick },
@@ -182,9 +224,9 @@ function headStats() {
 }
 
 /** Колір монети витрати за поточний місяць — з темпом і кількістю операцій. */
-function coinBudget(c, spent, ym = M.monthOf(M.ymd())) {
+function coinBudget(c, spent, ym = currentPeriod()) {
   const count = state.ops.filter((op) => op.to === c.id && inMonth(op, ym)).length;
-  const elapsed = ym === M.monthOf(M.ymd()) ? M.monthElapsed() : 1;
+  const elapsed = ym === currentPeriod() ? periodElapsed(ym) : 1;
   return M.budgetState(spent, c.budget, { elapsed, count });
 }
 
@@ -211,7 +253,7 @@ function animateSums() {
 
 /** Маленька монета для рядків і шапки екрана суми — того ж кольору, що на головній. */
 function miniCoin(c) {
-  const st = c.kind === 'expense' ? coinBudget(c, monthSpent(c, M.monthOf(M.ymd()))).st : '';
+  const st = c.kind === 'expense' ? coinBudget(c, monthSpent(c, currentPeriod())).st : '';
   return h('span', { class: `mini-coin k-${c.kind}${st ? ` st-${st}` : ''}`, 'aria-hidden': 'true' }, icon(hasIcon(c.icon) ? c.icon : 'coins'));
 }
 
@@ -307,7 +349,7 @@ function planHint() {
 }
 
 function viewMain() {
-  const ym = M.monthOf(M.ymd());
+  const ym = currentPeriod();
   const incomeOpen = recall('income-open') === '1';
   // Цілі стоять у сітці витрат, як копилка
   const grid = state.coins.filter((c) => (c.kind === 'expense' || c.kind === 'goal') && !c.archived).sort((a, b) => a.order - b.order);
@@ -958,7 +1000,7 @@ const firstOpDate = () => state.ops.reduce((m, op) => (op.date < m ? op.date : m
 /** Межі звіту: свій період з фільтра або місяць, що гортається. Дати — рядки «РРРР-ММ-ДД», порівнюються як рядки. */
 function reportRange() {
   if (customPeriod()) return [reportFilter.from || firstOpDate(), reportFilter.to || M.ymd()];
-  return [`${reportMonth}-01`, `${reportMonth}-31`];
+  return periodRange(reportMonth);
 }
 
 const dmy = (date) => `${date.slice(8, 10)}.${date.slice(5, 7)}.${date.slice(0, 4)}`;
@@ -967,7 +1009,7 @@ function shortRange() {
   const [lo, hi] = reportRange();
   return lo.slice(0, 4) === hi.slice(0, 4) ? `${dmy(lo).slice(0, 5)} – ${dmy(hi)}` : `${dmy(lo)} – ${dmy(hi)}`;
 }
-const reportTitle = () => (customPeriod() ? reportRange().map(dmy).join(' – ') : M.monthTitle(reportMonth));
+const reportTitle = () => (customPeriod() ? reportRange().map(dmy).join(' – ') : periodTitle(reportMonth));
 
 /** Операції звіту в гривнях: потрібного типу, у межах періоду, з вибраних рахунків. */
 function reportItems(kind) {
@@ -1085,7 +1127,7 @@ function viewReport() {
     nav,
     total ? donut(parts, total, picked
       ? [h('span', {}, picked.c.name), h('b', {}, M.money(picked.v)), h('span', {}, `${Math.round((picked.v / total) * 100)}%`)]
-      : [h('span', {}, custom ? shortRange() : M.monthTitle(reportMonth)), h('b', {}, M.money(real))])
+      : [h('span', {}, custom ? shortRange() : periodTitle(reportMonth)), h('b', {}, M.money(real))])
       : h('p', { class: 'empty' }, custom ? `За цей період ${what} немає` : `Цього місяця ${what} немає`),
     total ? h('div', { class: 'card' }, parts.map((p) => h('button', {
       type: 'button', class: `rep-row${reportPick === p.c.id ? ' on' : ''}`,
@@ -1306,6 +1348,24 @@ async function fetchRates(force = false) {
   return true;
 }
 
+function periodCard() {
+  const day = startDay();
+  const select = h('select', {
+    class: 'field', 'aria-label': 'День початку місяця',
+    onChange: async (e) => {
+      await save({ meta: { put: [{ id: 'period', day: Number(e.target.value) }] } }, { redraw: false });
+      reportMonth = currentPeriod();
+      render();
+      toast(Number(e.target.value) === 1 ? 'Місяць — календарний' : `Місяць обліку — з ${e.target.value}-го`);
+    },
+  }, Array.from({ length: 28 }, (_, i) => h('option', { value: String(i + 1), selected: i + 1 === day }, i === 0 ? '1 — календарний місяць' : `${i + 1}-го числа`)));
+  return h('section', { class: 'card set-card' },
+    h('h2', {}, 'Початок місяця'),
+    h('p', { class: 'muted small' }, 'З якого дня рахувати місяць: бюджети, «Витрати», «В планах» і звіт «Загальний». Зручно — з дня зарплати.'),
+    select,
+    day === 1 ? null : h('p', { class: 'muted small' }, `Зараз: ${periodTitle(currentPeriod())}`));
+}
+
 function viewSettings() {
   const m = ratesMeta();
   const rateInput = (cc) => h('input', {
@@ -1323,6 +1383,7 @@ function viewSettings() {
   return h('div', { class: 'page stack' },
     aboutPanel(),
     h('section', { class: 'card set-card' }, h('h2', {}, 'Тема'), theme),
+    periodCard(),
     h('section', { class: 'card set-card' },
       h('h2', {}, 'Курси до гривні'),
       h('div', { class: 'rate-row' }, h('b', {}, '$'), rateInput('USD')),
@@ -1679,6 +1740,7 @@ async function init() {
   registerWorker();
   try {
     Object.assign(state, await loadAll());
+    reportMonth = currentPeriod();
     if (!state.meta.some((m) => m.id === 'seeded')) {
       await save({ coins: { put: M.seedCoins(uid) }, meta: { put: [{ id: 'seeded', at: M.ymd() }] } }, { redraw: false });
     }
