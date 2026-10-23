@@ -1735,15 +1735,13 @@ async function importBackup(f) {
 // ---------- меню й маршрути ----------
 
 const MENU = [
-  ['feed', 'feed', 'Стрічка'],
-  ['days', 'daily', 'Звіт по днях'],
-  ['report', 'pie', 'Загальний'],
-  ['history', 'chart', 'Історія'],
-  ['subs', 'refresh', 'Регулярні платежі'],
-  ['warranty', 'shield', 'Гарантії'],
-  ['reconcile', 'check', 'Звірка залишків'],
-  ['settings', 'gear', 'Налаштування'],
+  ['Огляд', [['feed', 'feed', 'Стрічка'], ['days', 'daily', 'Звіт по днях'], ['report', 'pie', 'Загальний'], ['history', 'chart', 'Історія']]],
+  ['Планування', [['subs', 'refresh', 'Регулярні платежі'], ['warranty', 'shield', 'Гарантії'], ['reconcile', 'scale', 'Звірка залишків']]],
 ];
+
+/** Порожній екран: іконка в колі, заголовок і підказка, що робити. */
+const emptyState = (ico, title, text) => h('div', { class: 'empty-state' },
+  h('span', { class: 'empty-ico' }, icon(ico)), h('b', {}, title), h('p', {}, text));
 
 // ---------- регулярні платежі ----------
 
@@ -1762,7 +1760,8 @@ const activeRule = (op) => Boolean(op.repeat?.every) && (!op.repeat.until || op.
 function viewSubs() {
   const rules = state.ops.filter((op) => op.repeat?.every).sort((a, b) => b.amount - a.amount);
   if (!rules.length) {
-    return h('div', { class: 'page' }, h('p', { class: 'empty' }, 'Регулярних платежів ще немає. Відкрий операцію й натисни ⟳ на клавіатурі суми — щомісяця, щотижня…'));
+    return h('div', { class: 'page' }, emptyState('refresh', 'Регулярних платежів ще немає',
+      'Комуналка, підписки, оренда: відкрий операцію й натисни ⟳ на клавіатурі суми — щомісяця, щотижня чи щороку.'));
   }
   const today = M.ymd();
   const active = rules.filter(activeRule);
@@ -1777,26 +1776,37 @@ function viewSubs() {
     toast(`Зупинено: ${coinOr(op.to).name}`, { label: 'Скасувати', run: () => save({ ops: { put: [{ ...op }] } }) });
   };
   const resume = (op) => save({ ops: { put: [{ ...op, repeat: { ...op.repeat, until: '' } }] } });
+  const soon = (date) => {
+    const n = daysLeft(date);
+    return n === 0 ? 'сьогодні' : n === 1 ? 'завтра' : `через ${n} дн.`;
+  };
   const row = (op, on) => {
     const t = opType(op);
     const src = coinOr(op.from);
     const dst = coinOr(op.to);
     const next = on ? nextRepeat(op) : null;
     const name = [t === 'income' ? src.name : dst.name, op.comment].filter(Boolean).join(' · ');
-    return h('div', { class: 'sub-row' },
+    const perMonth = op.repeat.every !== 'month' && t !== 'transfer' ? `≈ ${M.money(Math.round(monthly(op)))}/міс` : '';
+    return h('div', { class: `sub-row${on ? '' : ' off'}` },
       h('button', { type: 'button', class: 'sub-main', onClick: () => openAmount({ from: op.from, to: op.to, op }) },
         miniCoin(t === 'income' ? src : dst),
         h('span', { class: 'sub-text' },
           h('b', {}, name),
-          h('span', {}, `${M.repeatLabel(op.repeat.every)}${next ? ` · наступний ${M.dateTitle(next)}` : ''}${!on ? ` · зупинено ${M.dateTitle(op.repeat.until)}` : ''}`)),
-        h('span', { class: `sub-sum ${t}` }, M.money(op.amount, src.currency))),
-      on ? h('button', { type: 'button', class: 'btn small', onClick: () => stop(op) }, 'Зупинити')
-        : h('button', { type: 'button', class: 'btn small', onClick: () => resume(op) }, 'Відновити'));
+          h('span', {}, [M.repeatLabel(op.repeat.every), perMonth, on ? '' : `зупинено ${dmy(op.repeat.until)}`].filter(Boolean).join(' · '))),
+        h('span', { class: 'sub-right' },
+          h('span', { class: `sub-sum ${t}` }, M.money(op.amount, src.currency)),
+          next ? h('span', { class: `pill${daysLeft(next) <= 3 ? ' warn' : ''}` }, soon(next)) : null)),
+      h('button', {
+        type: 'button', class: 'icon-btn sub-act', 'aria-label': on ? `Зупинити: ${name}` : `Відновити: ${name}`, title: on ? 'Зупинити' : 'Відновити',
+        onClick: () => (on ? stop(op) : resume(op)),
+      }, icon(on ? 'pause' : 'play')));
   };
   return h('div', { class: 'page stack' },
-    h('div', { class: 'card sub-total' },
-      h('div', {}, h('span', {}, 'Витрати на місяць'), h('b', { class: 'minus' }, `≈ ${M.money(Math.round(outM))}`), h('span', {}, `за рік ≈ ${M.money(Math.round(outM * 12))}`)),
-      inM ? h('div', {}, h('span', {}, 'Доходи на місяць'), h('b', { class: 'plus' }, `≈ ${M.money(Math.round(inM))}`), h('span', {}, `за рік ≈ ${M.money(Math.round(inM * 12))}`)) : null),
+    h('div', { class: 'card hero' },
+      h('span', { class: 'hero-cap' }, 'Регулярні витрати на місяць'),
+      h('b', { class: 'hero-num' }, `≈ ${M.money(Math.round(outM))}`),
+      h('span', { class: 'hero-sub' }, `за рік ≈ ${M.money(Math.round(outM * 12))} · ${active.length} ${active.length === 1 ? 'платіж' : active.length < 5 ? 'платежі' : 'платежів'}`),
+      inM ? h('span', { class: 'hero-sub plus' }, `регулярні доходи ≈ ${M.money(Math.round(inM))} на місяць`) : null),
     active.length ? h('div', { class: 'card' }, active.map((op) => row(op, true))) : h('p', { class: 'empty' }, 'Усі регулярні платежі зупинено'),
     stopped.length ? h('details', { class: 'card fold-card' }, h('summary', {}, `Зупинені (${stopped.length})`), stopped.map((op) => row(op, false))) : null);
 }
@@ -1995,27 +2005,35 @@ function showPhoto(url) {
 function viewWarranty() {
   const list = warrantyOps();
   if (!list.length) {
-    return h('div', { class: 'page' }, h('p', { class: 'empty' }, 'Покупок з гарантією ще немає. На екрані суми натисни 💬 «Деталі» — там дата «Гарантія до» і фото чека.'));
+    return h('div', { class: 'page' }, emptyState('shield', 'Покупок з гарантією ще немає',
+      'На екрані суми натисни 💬 «Деталі»: там дата «Гарантія до» і фото чека — не доведеться шукати папірець.'));
   }
   const row = (op) => {
     const left = daysLeft(op.warranty);
     const src = coinOr(op.from);
-    const when = left < 0 ? `скінчилась ${dmy(op.warranty)}` : left === 0 ? 'останній день' : `до ${dmy(op.warranty)} · ще ${left} дн.`;
-    return h('div', { class: 'war-row' },
+    // Скільки гарантійного строку вже минуло — смужкою: зелена, за місяць до кінця помаранчева, скінчилась — сіра
+    const total = Math.max(1, Math.round((M.parseYmd(op.warranty) - M.parseYmd(op.date)) / 864e5));
+    const used = Math.min(1, Math.max(0, (total - left) / total));
+    const st = left < 0 ? 'over' : left <= WARRANTY_SOON ? 'soon' : 'ok';
+    const pill = left < 0 ? 'скінчилась' : left === 0 ? 'останній день' : left < 60 ? `ще ${left} дн.` : `ще ${Math.round(left / 30.4)} міс.`;
+    return h('div', { class: `war-row ${st}` },
       h('button', { type: 'button', class: 'sub-main', onClick: () => openAmount({ from: op.from, to: op.to, op }) },
         miniCoin(coinOr(op.to)),
         h('span', { class: 'sub-text' },
           h('b', {}, opName(op)),
-          h('span', { class: left >= 0 && left <= WARRANTY_SOON ? 'war-soon' : '' }, `куплено ${dmy(op.date)} · ${when}`)),
-        h('span', { class: 'sub-sum' }, M.money(op.amount, src.currency))),
+          h('span', {}, `${dmy(op.date)} → ${dmy(op.warranty)}`)),
+        h('span', { class: 'sub-right' },
+          h('span', { class: 'sub-sum' }, M.money(op.amount, src.currency)),
+          h('span', { class: `pill ${st === 'ok' ? 'ok' : st === 'soon' ? 'warn' : ''}` }, pill))),
+      h('div', { class: 'war-bar', role: 'presentation', style: { '--p': `${Math.round(used * 100)}%` } }, h('span')),
       op.photos?.length ? h('div', { class: 'photo-row' }, op.photos.map((id) => photoThumb(id))) : null);
   };
   const active = list.filter((op) => daysLeft(op.warranty) >= 0);
   const over = list.filter((op) => daysLeft(op.warranty) < 0).reverse();
   return h('div', { class: 'page stack' },
-    h('p', { class: 'muted small' }, 'Фото чеків зберігаються лише на цьому телефоні — у Google Диск і резервну копію вони не йдуть.'),
     active.length ? h('div', { class: 'card' }, active.map(row)) : h('p', { class: 'empty' }, 'Діючих гарантій немає'),
-    over.length ? h('details', { class: 'card fold-card' }, h('summary', {}, `Скінчились (${over.length})`), over.map(row)) : null);
+    over.length ? h('details', { class: 'card fold-card' }, h('summary', {}, `Скінчились (${over.length})`), over.map(row)) : null,
+    h('p', { class: 'foot-note' }, icon('camera'), 'Фото чеків зберігаються лише на цьому телефоні — у Google Диск і резервну копію вони не йдуть.'));
 }
 
 // ---------- патрони на склад Стрілецького журналу ----------
@@ -2113,17 +2131,40 @@ function lostCoin(kind, extra) {
 
 function viewReconcile() {
   const accs = coinsOf('account');
+  if (!accs.length) return h('div', { class: 'page' }, emptyState('scale', 'Рахунків немає', 'Додай рахунок на головній — тоді буде що звіряти.'));
   const fields = accs.map((c) => h('input', {
     type: 'number', inputmode: 'decimal', step: '0.01', class: 'field', value: String(M.round2(balance(c))), 'aria-label': `Насправді: ${c.name}`,
   }));
+  const diffs = accs.map(() => h('span', { class: 'rec-diff' }));
+  const runText = h('span', {});
+  const runBtn = h('button', { type: 'button', class: 'btn primary', onClick: () => run() }, icon('check'), runText);
+  const diffOf = (c, i) => {
+    const real = Number(fields[i].value);
+    return fields[i].value === '' || !Number.isFinite(real) ? 0 : M.round2(real - balance(c));
+  };
+  // Різниця видна одразу, поки вписуєш: плюс — знайшлось більше, мінус — недостача
+  const paintDiffs = () => {
+    let n = 0;
+    accs.forEach((c, i) => {
+      const v = diffOf(c, i);
+      const on = Math.abs(v) >= 0.01;
+      if (on) n += 1;
+      diffs[i].textContent = on ? M.money(v, c.currency, { sign: v > 0 ? '+ ' : '− ' }) : 'збігається';
+      diffs[i].className = `rec-diff ${on ? (v > 0 ? 'plus' : 'minus') : ''}`;
+    });
+    runBtn.disabled = !n;
+    runText.textContent = n ? `Записати різницю (${n})` : 'Усе збігається';
+  };
+  for (const f of fields) {
+    f.addEventListener('input', paintDiffs);
+    f.addEventListener('focus', () => f.select());
+  }
   const run = async () => {
     const today = M.ymd();
     const newCoins = [];
     const ops = [];
     accs.forEach((c, i) => {
-      const real = Number(fields[i].value);
-      if (fields[i].value === '' || !Number.isFinite(real)) return;
-      const diff = M.round2(real - balance(c));
+      const diff = diffOf(c, i);
       if (Math.abs(diff) < 0.01) return;
       const base = { id: uid(), date: today, tags: [], comment: 'Звірка залишків', created: Date.now() };
       if (diff < 0) {
@@ -2146,12 +2187,15 @@ function viewReconcile() {
       label: 'Скасувати', run: () => save({ ops: { del: ops.map((o) => o.id) }, coins: { del: newCoins.map((c) => c.id) } }),
     });
   };
+  paintDiffs();
   return h('div', { class: 'page stack' },
-    h('p', { class: 'muted small' }, 'Давно не вносив витрати? Впиши, скільки зараз насправді на кожному рахунку. Різниця запишеться однією операцією: недостача — витратою «Не пам’ятаю», надлишок — доходом «Не пам’ятаю».'),
+    h('div', { class: 'card hero' },
+      h('span', { class: 'hero-cap' }, 'Давно не вносив витрати?'),
+      h('span', { class: 'hero-sub' }, 'Впиши, скільки зараз насправді на кожному рахунку. Різниця запишеться однією операцією: недостача — витратою «Не пам’ятаю», надлишок — доходом.')),
     h('div', { class: 'card' }, accs.map((c, i) => h('label', { class: 'rec-row' },
       h('span', { class: 'rec-name' }, miniCoin(c), h('span', {}, h('b', {}, c.name), h('span', { class: 'muted small' }, `в обліку ${M.money(balance(c), c.currency)}`))),
-      fields[i]))),
-    h('button', { type: 'button', class: 'btn primary', onClick: run }, icon('check'), 'Звірити'));
+      h('span', { class: 'rec-in' }, fields[i], diffs[i])))),
+    runBtn);
 }
 
 function openMenu() {
@@ -2162,9 +2206,28 @@ function openMenu() {
     history.replaceState(null, '', `#${key}`);
     route();
   };
+  const here = location.hash.slice(1).split('/')[0];
+  // Лічильник біля пункту: що чекає уваги (помаранчевий) чи просто скільки є
+  const badge = (key) => {
+    if (key === 'feed') { const n = dueCount(); return n ? [n, 'warn'] : null; }
+    if (key === 'subs') { const n = state.ops.filter(activeRule).length; return n ? [n, ''] : null; }
+    if (key === 'warranty') {
+      const n = warrantyOps().filter((op) => daysLeft(op.warranty) >= 0 && daysLeft(op.warranty) <= WARRANTY_SOON).length;
+      return n ? [n, 'warn'] : null;
+    }
+    return null;
+  };
+  const item = ([key, ico, label]) => {
+    const b = badge(key);
+    return h('button', { type: 'button', class: `menu-item${here === key ? ' on' : ''}`, onClick: () => pick(key) },
+      icon(ico), h('span', { class: 'menu-label' }, label), b ? h('span', { class: `menu-badge ${b[1]}` }, String(b[0])) : null);
+  };
   const close = sheet('Меню', h('nav', { class: 'menu' },
-    h('div', { class: 'menu-brand' }, 'Марнотрат'),
-    MENU.map(([key, ico, label]) => h('button', { type: 'button', class: 'menu-item', onClick: () => pick(key) }, icon(ico), label))),
+    h('div', { class: 'menu-head' },
+      h('img', { class: 'menu-logo', src: './icons/icon-192.png', alt: '', width: 44, height: 44 }),
+      h('span', {}, h('b', {}, 'Марнотрат'), h('span', {}, `на рахунках ${M.money(Math.round(totalBalance()))}`))),
+    MENU.map(([title, items]) => h('div', { class: 'menu-group' }, h('p', { class: 'menu-cap' }, title), items.map(item))),
+    h('div', { class: 'menu-foot' }, item(['settings', 'gear', 'Налаштування']), h('p', { class: 'menu-ver' }, `версія ${self.APP_VERSION}`))),
   { cls: 'drawer', bare: true });
 }
 
