@@ -1,6 +1,6 @@
 // Марнотрат: головна з монетами, екран суми, стрічка, звіти, налаштування.
 import { loadAll, write, uid, replaceAll, putFile, getFile, dropFilesExcept } from './db.js';
-import { slAvailable, cartridges, addBuy, removeBuy } from './ammo.js';
+import { slAvailable, readJournal, addRecord, patchRecord, removeRecord } from './journal.js';
 import * as M from './model.js';
 import * as Sync from './sync.js';
 import { demoChanges, demoRemoval, hasDemo } from './demo.js';
@@ -438,6 +438,27 @@ const PAGE_WAIT = 600;
 const LONG_PRESS = 500;
 const EDGE = 70;
 
+/**
+ * Копія монети після відпускання: влучив — втягується в ціль, і та її «ловить», з подвійним відгуком;
+ * мимо — плавно вертається на місце. Без анімацій у системі — просто зникає.
+ */
+function flyGhost(ghost, target, home) {
+  if (target) {
+    vibrate([18, 40, 18]);
+    const f = target.querySelector('.coin-face');
+    f?.classList.add('catch');
+    f?.addEventListener('animationend', () => f.classList.remove('catch'), { once: true });
+  }
+  const to = (target?.querySelector('.coin-face') ?? home).getBoundingClientRect();
+  if (!ghost.animate || !to.width || matchMedia('(prefers-reduced-motion: reduce)').matches) { ghost.remove(); return; }
+  const anim = ghost.animate([{}, {
+    left: `${to.left + to.width / 2}px`, top: `${to.top + to.height / 2}px`,
+    transform: `translate(-50%, -50%) scale(${target ? 0.3 : 1})`, opacity: target ? 0 : 0.5,
+  }], { duration: target ? 200 : 260, easing: 'cubic-bezier(.3, .7, .4, 1)', fill: 'forwards' });
+  anim.onfinish = () => ghost.remove();
+  anim.oncancel = () => ghost.remove();
+}
+
 function bindCoin(el, face, c) {
   face.addEventListener('contextmenu', (e) => e.preventDefault());
   face.addEventListener('pointerdown', (e) => {
@@ -521,8 +542,9 @@ function bindCoin(el, face, c) {
       const target = drag?.over;
       const wasDrag = Boolean(drag);
       const tap = !moved && !long && ev.type === 'pointerup';
-      cleanup();
-      if (wasDrag && target && ev.type === 'pointerup') {
+      const hit = wasDrag && target && ev.type === 'pointerup';
+      cleanup(hit ? target : null);
+      if (hit) {
         if (editing()) reorder(c, target.dataset.id);
         else openAmount({ from: c.id, to: target.dataset.id });
       } else if (tap) {
@@ -530,14 +552,14 @@ function bindCoin(el, face, c) {
         else openFeed(c.id);
       }
     };
-    function cleanup() {
+    function cleanup(landed = null) {
       clearTimeout(timer);
       removeEventListener('pointermove', onMove);
       removeEventListener('pointerup', onUp);
       removeEventListener('pointercancel', onUp);
       if (!drag) return;
       cancelAnimationFrame(drag.raf);
-      drag.ghost.remove();
+      flyGhost(drag.ghost, landed, face);
       document.body.classList.remove('dragging');
       el.classList.remove('drag-src');
       for (const t of document.querySelectorAll('.drop-ok, .drop-over')) t.classList.remove('drop-ok', 'drop-over');
@@ -674,6 +696,7 @@ function openAmount({ from, to, op = null, preset = null }) {
     if (d.warranty) rec.warranty = d.warranty;
     if (d.photos.length) rec.photos = d.photos;
     if (op?.ammo) rec.ammo = op.ammo;
+    if (op?.sl) rec.sl = op.sl;
     if (preset) { rec.fromRule = preset.rule.id; rec.ruleDate = preset.date; }
     if (op?.fromRule) { rec.fromRule = op.fromRule; rec.ruleDate = op.ruleDate; }
     if (canRepeat && d.repeat.every) rec.repeat = { every: d.repeat.every, until: d.repeat.until, skip: op?.repeat?.skip ?? [] };
@@ -686,7 +709,8 @@ function openAmount({ from, to, op = null, preset = null }) {
       label: 'Скасувати',
       run: () => save(op ? { ops: { put: [{ ...op }] } } : { ops: { del: [rec.id] } }),
     });
-    if (wantsAmmo(rec)) offerAmmo(rec);
+    const slk = slKind(rec);
+    if (slk) offerJournal(rec, slk);
   };
   const remove = async () => {
     closeSheet();
@@ -859,7 +883,7 @@ function opRow(op) {
   const every = op.plan ? op.rule.repeat.every : op.repeat?.every;
   const note = [(op.tags ?? []).map((x) => `#${x}`).join(' '), op.comment, every ? `⟳ ${M.repeatLabel(every)}` : '',
     op.warranty && !op.plan ? `гарантія до ${dmy(op.warranty)}` : '', op.photos?.length && !op.plan ? `фото: ${op.photos.length}` : '',
-    op.ammo?.qty && !op.plan ? `на склад: ${op.ammo.qty} шт` : ''].filter(Boolean);
+    op.plan ? '' : slNote(op)].filter(Boolean);
   const second = op.amountTo != null && t === 'transfer' ? ` → ${M.money(op.amountTo, dst.currency)}` : '';
   // Запланований повтор: тап — провести з правкою суми, свайп вправо — провести як є, вліво — пропустити чи зупинити
   if (op.plan) {
@@ -2036,29 +2060,47 @@ function viewWarranty() {
     h('p', { class: 'foot-note' }, icon('camera'), 'Фото чеків зберігаються лише на цьому телефоні — у Google Диск і резервну копію вони не йдуть.'));
 }
 
-// ---------- патрони на склад Стрілецького журналу ----------
+// ---------- покупки для Стрілецького журналу ----------
 
-const AMMO_TAGS = ['патрони', 'набої'];
-const wantsAmmo = (op) => opType(op) === 'expense' && !op.ammo && (op.tags ?? []).some((t) => AMMO_TAGS.includes(t.toLowerCase()));
+// Тег витрати → що записати в журнал: патрони на склад, тюнінг ствола, екіпірування
+const SL_TAGS = [
+  ['ammo', ['патрони', 'набої']],
+  ['mod', ['тюнінг', 'тюнинг']],
+  ['gear', ['екіпірування', 'спорядження']],
+];
+// Категорії екіпірування — ті самі ключі, що в журналі
+const GEAR_KINDS = [['armor', 'Бронезахист'], ['carry', 'Розвантаження й підсумки'], ['clothes', 'Одяг і форма'], ['devices', 'Прилади'], ['other', 'Інше']];
 
-/** Після покупки з тегом #патрони: який патрон і скільки — і рух «купівля» в журнал. */
-async function offerAmmo(rec) {
-  if (!(await slAvailable())) return;
-  let list;
-  try { list = await cartridges(); } catch { return; }
-  // Екран суми ще закривається через history.back — нова шторка має відкритись після нього, інакше він її й закриє
-  if (history.state?.sheet) await new Promise((r) => { addEventListener('popstate', r, { once: true }); setTimeout(r, 600); });
-  const latest = () => state.ops.find((o) => o.id === rec.id);
-  const uah = M.round2(toUah(rec.amount, coinOr(rec.from).currency));
-  if (!list.length) {
-    const close = sheet('Патрони на склад', h('div', { class: 'form' },
-      h('p', {}, 'У Стрілецькому журналі ще немає жодного патрона. Додай його там, а потім відкрий цю покупку й збережи ще раз.'),
-      h('div', { class: 'btn-grid' },
-        h('a', { class: 'btn', href: '../shooting-log/' }, 'Відкрити журнал'),
-        h('button', { type: 'button', class: 'btn primary', onClick: () => close() }, 'Зрозуміло'))));
-    return;
-  }
-  let pick = list.length === 1 ? list[0].id : null;
+/** Що ця витрата для журналу: вид за тегом, або null — не витрата, уже записано чи відмовились. op.ammo — з 0.2.6. */
+function slKind(op) {
+  if (opType(op) !== 'expense' || op.sl || op.ammo) return null;
+  const tags = (op.tags ?? []).map((t) => t.toLowerCase());
+  return SL_TAGS.find(([, names]) => names.some((n) => tags.includes(n)))?.[0] ?? null;
+}
+
+const slNote = (op) => op.sl?.text ?? (op.ammo?.qty ? `на склад: ${op.ammo.qty} шт` : '');
+
+/** Чипи вибору однієї позиції групами: sel.id — вибране. */
+function choiceGroups(groups, sel) {
+  const btns = [];
+  return groups.map(([cap, items]) => [cap ? h('p', { class: 'flabel' }, cap) : null, h('div', { class: 'chips' }, items.map(([id, label]) => {
+    const b = h('button', {
+      type: 'button', class: `chip${id === sel.id ? ' on' : ''}`,
+      onClick: () => { sel.id = id; for (const x of btns) x.classList.toggle('on', x === b); },
+    }, label);
+    btns.push(b);
+    return b;
+  }))]);
+}
+
+const nameField = (value, placeholder) => h('input', { type: 'text', maxlength: 80, class: 'field', value, placeholder, 'aria-label': 'Назва' });
+const gunLabel = (w) => `${w.name}${w.caliber ? ` · ${w.caliber}` : ''}`;
+const byName = (a, b) => (a.name ?? '').localeCompare(b.name ?? '', 'uk');
+
+/** Патрони: який і скільки — рух «купівля» на склад. */
+function ammoSpec({ j, rec, uah }) {
+  if (!j.cartridges.length) return { empty: 'У журналі ще немає жодного патрона. Додай його там, а потім відкрий цю покупку й збережи ще раз.' };
+  const sel = { id: j.cartridges.length === 1 ? j.cartridges[0].id : null };
   const qty = h('input', { type: 'number', inputmode: 'numeric', min: '1', step: '1', class: 'field', placeholder: 'Скільки штук', 'aria-label': 'Кількість, шт' });
   const each = h('p', { class: 'muted small' }, `Сума покупки: ${M.money(uah)}`);
   const showEach = () => {
@@ -2070,49 +2112,113 @@ async function offerAmmo(rec) {
   const quick = h('div', { class: 'chips' }, [20, 50, 100, 200, 500].map((n) => h('button', {
     type: 'button', class: 'chip', onClick: () => { qty.value = String(n); showEach(); },
   }, String(n))));
-  // Патрони групами за калібром, найбільший залишок — першим
+  // Групами за калібром, найбільший залишок — першим
   const byCal = new Map();
-  for (const c of [...list].sort((a, b) => b.stock - a.stock)) byCal.set(c.caliber || 'Інші', [...(byCal.get(c.caliber || 'Інші') ?? []), c]);
-  const btns = [];
-  const pickRows = [...byCal].map(([cal, cs]) => [h('p', { class: 'flabel' }, cal), h('div', { class: 'chips' }, cs.map((c) => {
-    const b = h('button', {
-      type: 'button', class: `chip${c.id === pick ? ' on' : ''}`,
-      onClick: () => { pick = c.id; for (const x of btns) x.classList.toggle('on', x === b); },
-    }, `${c.name} · ${c.stock} шт`);
-    btns.push(b);
-    return b;
-  }))]);
-  const skip = async () => {
-    close();
-    const cur = latest();
-    if (cur) await save({ ops: { put: [{ ...cur, ammo: { skip: true } }] } });
+  for (const c of [...j.cartridges].sort((a, b) => b.stock - a.stock)) byCal.set(c.caliber || 'Інші', [...(byCal.get(c.caliber || 'Інші') ?? []), c]);
+  return {
+    title: 'Патрони на склад', ok: 'На склад',
+    intro: 'Покупка з тегом #патрони — записати її на склад Стрілецького журналу?',
+    body: [choiceGroups([...byCal].map(([cal, cs]) => [cal, cs.map((c) => [c.id, `${c.name} · ${c.stock} шт`])]), sel),
+      h('label', { class: 'flabel' }, 'Скільки штук'), qty, quick, each],
+    async store() {
+      const c = j.cartridges.find((x) => x.id === sel.id);
+      const n = Math.round(Number(qty.value));
+      if (!c) { toast('Вибери патрон'); return null; }
+      if (!(n > 0)) { toast('Скільки штук?'); qty.focus(); return null; }
+      const mv = { id: uid(), kind: 'buy', date: rec.date, cartridgeId: c.id, caliber: c.caliber, qty: n, price: uah, note: rec.comment || 'Марнотрат' };
+      await addRecord('movements', mv);
+      return { sl: { kind: 'ammo', id: mv.id, text: `на склад: ${n} шт` }, text: `+${n} шт · ${c.name} — на складі`, undo: () => removeRecord('movements', mv.id) };
+    },
   };
+}
+
+/** Тюнінг: до якого ствола і що — рядок у «Вкладено в ствол». */
+function modSpec({ j, rec, uah }) {
+  if (!j.weapons.length) return { empty: 'У журналі ще немає жодного ствола. Додай його там, а потім відкрий цю покупку й збережи ще раз.' };
+  const guns = [...j.weapons].sort(byName);
+  const sel = { id: guns.length === 1 ? guns[0].id : null };
+  const name = nameField(rec.comment, 'Спуск, цівка, ДТК, приклад…');
+  return {
+    title: 'Тюнінг у журнал', ok: 'Записати',
+    intro: `Покупка з тегом #тюнінг на ${M.money(uah)} — до якого ствола записати?`,
+    body: [choiceGroups([['Ствол', guns.map((w) => [w.id, gunLabel(w)])]], sel), h('label', { class: 'flabel' }, 'Що саме'), name],
+    async store() {
+      const w = guns.find((x) => x.id === sel.id);
+      const title = name.value.trim();
+      if (!w) { toast('Вибери ствол'); return null; }
+      if (!title) { toast('Напиши, що саме'); name.focus(); return null; }
+      const mod = { id: uid(), created: Date.now(), name: title, price: uah, date: rec.date, note: 'Марнотрат' };
+      if (!(await patchRecord('weapons', w.id, (old) => ({ ...old, mods: [...(old.mods ?? []), mod] })))) { toast('Ствол уже видалено з журналу'); return null; }
+      return {
+        sl: { kind: 'mod', id: mod.id, gun: w.id, text: `тюнінг: ${w.name}` }, text: `${title} → ${w.name}`,
+        undo: () => patchRecord('weapons', w.id, (old) => ({ ...old, mods: (old.mods ?? []).filter((m) => m.id !== mod.id) })),
+      };
+    },
+  };
+}
+
+/** Екіпірування: категорія й назва — новий запис у журналі. */
+function gearSpec({ rec, uah }) {
+  const sel = { id: null };
+  const name = nameField(rec.comment, 'Плитоноска, шолом, підсумок…');
+  return {
+    title: 'Екіпірування в журнал', ok: 'Записати',
+    intro: `Покупка з тегом #екіпірування на ${M.money(uah)} — записати її в Стрілецький журнал?`,
+    body: [choiceGroups([['Категорія', GEAR_KINDS]], sel), h('label', { class: 'flabel' }, 'Що саме'), name],
+    async store() {
+      const title = name.value.trim();
+      if (!sel.id) { toast('Вибери категорію'); return null; }
+      if (!title) { toast('Напиши, що саме'); name.focus(); return null; }
+      const g = { id: uid(), name: title, kind: sel.id, price: uah, date: rec.date, note: 'Марнотрат' };
+      await addRecord('gear', g);
+      return { sl: { kind: 'gear', id: g.id, text: `екіпірування: ${title}` }, text: `${title} — в екіпіруванні`, undo: () => removeRecord('gear', g.id) };
+    },
+  };
+}
+
+const SL_SPECS = { ammo: ammoSpec, mod: modSpec, gear: gearSpec };
+const SL_TITLES = { ammo: 'Патрони на склад', mod: 'Тюнінг у журнал', gear: 'Екіпірування в журнал' };
+
+/** Після покупки з тегом: шторка запису в журнал. «Не треба» запам'ятовується, «Скасувати» прибирає запис і з журналу. */
+async function offerJournal(rec, kind) {
+  if (!(await slAvailable())) return;
+  let j;
+  try { j = await readJournal(); } catch { return; }
+  // Екран суми ще закривається через history.back — нова шторка має відкритись після нього, інакше він її й закриє
+  if (history.state?.sheet) await new Promise((r) => { addEventListener('popstate', r, { once: true }); setTimeout(r, 600); });
+  const latest = () => state.ops.find((o) => o.id === rec.id);
+  const mark = async (sl) => {
+    const cur = latest();
+    if (cur) await save({ ops: { put: [{ ...cur, sl }] } });
+  };
+  const unmark = async () => {
+    const o = latest();
+    if (o) { const { sl, ammo, ...rest } = o; await save({ ops: { put: [rest] } }); }
+  };
+  const uah = M.round2(toUah(rec.amount, coinOr(rec.from).currency));
+  const spec = SL_SPECS[kind]({ j, rec, uah });
+  if (spec.empty) {
+    const close = sheet(SL_TITLES[kind], h('div', { class: 'form' },
+      h('p', {}, spec.empty),
+      h('div', { class: 'btn-grid' },
+        h('a', { class: 'btn', href: '../shooting-log/' }, 'Відкрити журнал'),
+        h('button', { type: 'button', class: 'btn primary', onClick: () => close() }, 'Зрозуміло'))));
+    return;
+  }
   const store = async () => {
-    const c = list.find((x) => x.id === pick);
-    const n = Math.round(Number(qty.value));
-    if (!c) { toast('Вибери патрон'); return; }
-    if (!(n > 0)) { toast('Скільки штук?'); qty.focus(); return; }
-    const mv = { id: uid(), date: rec.date, cartridgeId: c.id, caliber: c.caliber, qty: n, price: uah, note: rec.comment || 'Марнотрат' };
-    try { await addBuy(mv); } catch (err) { toast(`Не вдалося записати: ${err.message}`); return; }
+    let res;
+    try { res = await spec.store(); } catch (err) { toast(`Не вдалося записати: ${err.message}`); return; }
+    if (!res) return;
     close();
-    const cur = latest();
-    if (cur) await save({ ops: { put: [{ ...cur, ammo: { id: mv.id, qty: n, name: c.name } }] } });
-    toast(`+${n} шт · ${c.name} — на складі`, {
-      label: 'Скасувати',
-      run: async () => {
-        await removeBuy(mv.id);
-        const o = latest();
-        if (o) { const { ammo, ...rest } = o; await save({ ops: { put: [rest] } }); }
-      },
-    });
+    await mark(res.sl);
+    toast(res.text, { label: 'Скасувати', run: async () => { await res.undo(); await unmark(); } });
   };
-  const close = sheet('Патрони на склад', h('div', { class: 'form' },
-    h('p', { class: 'muted small' }, 'Покупка з тегом #патрони — записати її на склад Стрілецького журналу?'),
-    pickRows,
-    h('label', { class: 'flabel' }, 'Скільки штук'), qty, quick, each,
+  const close = sheet(spec.title, h('div', { class: 'form' },
+    h('p', { class: 'muted small' }, spec.intro),
+    spec.body,
     h('div', { class: 'btn-grid' },
-      h('button', { type: 'button', class: 'btn', onClick: skip }, 'Не треба'),
-      h('button', { type: 'button', class: 'btn primary', onClick: store }, icon('check'), 'На склад'))));
+      h('button', { type: 'button', class: 'btn', onClick: async () => { close(); await mark({ skip: true }); } }, 'Не треба'),
+      h('button', { type: 'button', class: 'btn primary', onClick: store }, icon('check'), spec.ok))));
 }
 
 // ---------- звірка залишків ----------

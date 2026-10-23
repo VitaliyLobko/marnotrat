@@ -207,7 +207,10 @@ a { color: var(--brand); }
 .coin:not(.coin-ghost) .coin-face:active { transform: scale(.93); }
 .coin.bump .coin-face { animation: bump .45s ease-out; }
 @keyframes bump { 40% { transform: scale(1.1); } }
-@media (prefers-reduced-motion: reduce) { .coin .coin-face, .coin.drop-over .coin-face, .coin.bump .coin-face { animation: none; transition: none; } }
+/* ціль «ловить» монету, яку на неї кинули */
+.coin-face.catch { animation: catch .32s ease-out; }
+@keyframes catch { 0% { transform: scale(1.12); } 45% { transform: scale(.9); } 100% { transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) { .coin .coin-face, .coin.drop-over .coin-face, .coin.bump .coin-face, .coin-face.catch { animation: none; transition: none; } }
 .coin.drag-src .coin-face { opacity: .4; }
 .coin-ghost {
   position: fixed; z-index: 60; pointer-events: none; margin: 0;
