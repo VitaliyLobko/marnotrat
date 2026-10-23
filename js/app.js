@@ -1701,8 +1701,123 @@ const MENU = [
   ['feed', 'feed', 'Стрічка'],
   ['days', 'daily', 'Звіт по днях'],
   ['report', 'pie', 'Загальний'],
+  ['subs', 'refresh', 'Регулярні платежі'],
+  ['reconcile', 'check', 'Звірка залишків'],
   ['settings', 'gear', 'Налаштування'],
 ];
+
+// ---------- регулярні платежі ----------
+
+// Скільки разів на місяць у середньому: тиждень — 52/12, день — 365/12
+const PER_MONTH = { day: 365 / 12, week: 52 / 12, month: 1, year: 1 / 12 };
+
+/** Наступна дата повтору після сьогодні (або null, якщо правило скінчилось). */
+function nextRepeat(rule) {
+  const today = M.ymd();
+  const last = M.repeatDates(rule.date, rule.repeat.every, rule.repeat.until, today).at(-1);
+  return last && last > today ? last : null;
+}
+
+const activeRule = (op) => Boolean(op.repeat?.every) && (!op.repeat.until || op.repeat.until >= M.ymd());
+
+function viewSubs() {
+  const rules = state.ops.filter((op) => op.repeat?.every).sort((a, b) => b.amount - a.amount);
+  if (!rules.length) {
+    return h('div', { class: 'page' }, h('p', { class: 'empty' }, 'Регулярних платежів ще немає. Відкрий операцію й натисни ⟳ на клавіатурі суми — щомісяця, щотижня…'));
+  }
+  const today = M.ymd();
+  const active = rules.filter(activeRule);
+  const stopped = rules.filter((op) => !activeRule(op));
+  // Місячний еквівалент у гривнях: витрати й доходи окремо, перекази не рахуються
+  const monthly = (op) => toUah(op.amount, coinOr(op.from).currency) * PER_MONTH[op.repeat.every];
+  const sumOf = (t) => active.filter((op) => opType(op) === t).reduce((s, op) => s + monthly(op), 0);
+  const outM = sumOf('expense');
+  const inM = sumOf('income');
+  const stop = async (op) => {
+    await save({ ops: { put: [{ ...op, repeat: { ...op.repeat, until: M.addDays(today, -1) } }] } });
+    toast(`Зупинено: ${coinOr(op.to).name}`, { label: 'Скасувати', run: () => save({ ops: { put: [{ ...op }] } }) });
+  };
+  const resume = (op) => save({ ops: { put: [{ ...op, repeat: { ...op.repeat, until: '' } }] } });
+  const row = (op, on) => {
+    const t = opType(op);
+    const src = coinOr(op.from);
+    const dst = coinOr(op.to);
+    const next = on ? nextRepeat(op) : null;
+    const name = [t === 'income' ? src.name : dst.name, op.comment].filter(Boolean).join(' · ');
+    return h('div', { class: 'sub-row' },
+      h('button', { type: 'button', class: 'sub-main', onClick: () => openAmount({ from: op.from, to: op.to, op }) },
+        miniCoin(t === 'income' ? src : dst),
+        h('span', { class: 'sub-text' },
+          h('b', {}, name),
+          h('span', {}, `${M.repeatLabel(op.repeat.every)}${next ? ` · наступний ${M.dateTitle(next)}` : ''}${!on ? ` · зупинено ${M.dateTitle(op.repeat.until)}` : ''}`)),
+        h('span', { class: `sub-sum ${t}` }, M.money(op.amount, src.currency))),
+      on ? h('button', { type: 'button', class: 'btn small', onClick: () => stop(op) }, 'Зупинити')
+        : h('button', { type: 'button', class: 'btn small', onClick: () => resume(op) }, 'Відновити'));
+  };
+  return h('div', { class: 'page stack' },
+    h('div', { class: 'card sub-total' },
+      h('div', {}, h('span', {}, 'Витрати на місяць'), h('b', { class: 'minus' }, `≈ ${M.money(Math.round(outM))}`), h('span', {}, `за рік ≈ ${M.money(Math.round(outM * 12))}`)),
+      inM ? h('div', {}, h('span', {}, 'Доходи на місяць'), h('b', { class: 'plus' }, `≈ ${M.money(Math.round(inM))}`), h('span', {}, `за рік ≈ ${M.money(Math.round(inM * 12))}`)) : null),
+    active.length ? h('div', { class: 'card' }, active.map((op) => row(op, true))) : h('p', { class: 'empty' }, 'Усі регулярні платежі зупинено'),
+    stopped.length ? h('details', { class: 'card fold-card' }, h('summary', {}, `Зупинені (${stopped.length})`), stopped.map((op) => row(op, false))) : null);
+}
+
+// ---------- звірка залишків ----------
+
+/** Монета «Не пам'ятаю» потрібного типу: знайти чи створити (витрата — недостача, дохід — надлишок). */
+function lostCoin(kind, extra) {
+  const found = state.coins.find((c) => c.kind === kind && c.lost && !c.archived);
+  if (found) return { coin: found, created: null };
+  const coin = {
+    id: uid(), kind, name: 'Не пам’ятаю', icon: 'circle-help', currency: 'UAH', budget: 0, start: 0,
+    order: Date.now(), archived: false, lost: true,
+  };
+  extra.push(coin);
+  return { coin, created: coin };
+}
+
+function viewReconcile() {
+  const accs = coinsOf('account');
+  const fields = accs.map((c) => h('input', {
+    type: 'number', inputmode: 'decimal', step: '0.01', class: 'field', value: String(M.round2(balance(c))), 'aria-label': `Насправді: ${c.name}`,
+  }));
+  const run = async () => {
+    const today = M.ymd();
+    const newCoins = [];
+    const ops = [];
+    accs.forEach((c, i) => {
+      const real = Number(fields[i].value);
+      if (fields[i].value === '' || !Number.isFinite(real)) return;
+      const diff = M.round2(real - balance(c));
+      if (Math.abs(diff) < 0.01) return;
+      const base = { id: uid(), date: today, tags: [], comment: 'Звірка залишків', created: Date.now() };
+      if (diff < 0) {
+        // Недостача: витрата з рахунку на «Не пам'ятаю»; рахунок у валюті — друга сума в гривнях
+        const { coin } = lostCoin('expense', newCoins);
+        const op = { ...base, from: c.id, to: coin.id, amount: -diff };
+        if (c.currency !== coin.currency) op.amountTo = M.round2(toUah(-diff, c.currency));
+        ops.push(op);
+      } else {
+        // Надлишок: дохід «Не пам'ятаю» на рахунок
+        const { coin } = lostCoin('income', newCoins);
+        const op = { ...base, from: coin.id, to: c.id, amount: c.currency === coin.currency ? diff : M.round2(toUah(diff, c.currency)) };
+        if (c.currency !== coin.currency) op.amountTo = diff;
+        ops.push(op);
+      }
+    });
+    if (!ops.length) { toast('Усе збігається — нічого записувати'); return; }
+    await save({ coins: { put: newCoins }, ops: { put: ops } });
+    toast(`Записано різниць: ${ops.length}`, {
+      label: 'Скасувати', run: () => save({ ops: { del: ops.map((o) => o.id) }, coins: { del: newCoins.map((c) => c.id) } }),
+    });
+  };
+  return h('div', { class: 'page stack' },
+    h('p', { class: 'muted small' }, 'Давно не вносив витрати? Впиши, скільки зараз насправді на кожному рахунку. Різниця запишеться однією операцією: недостача — витратою «Не пам’ятаю», надлишок — доходом «Не пам’ятаю».'),
+    h('div', { class: 'card' }, accs.map((c, i) => h('label', { class: 'rec-row' },
+      h('span', { class: 'rec-name' }, miniCoin(c), h('span', {}, h('b', {}, c.name), h('span', { class: 'muted small' }, `в обліку ${M.money(balance(c), c.currency)}`))),
+      fields[i]))),
+    h('button', { type: 'button', class: 'btn primary', onClick: run }, icon('check'), 'Звірити'));
+}
 
 function openMenu() {
   // Пункт меню займає запис шторки в історії: «Назад» з екрана веде на головну, а не в закрите меню.
@@ -1738,6 +1853,8 @@ const VIEWS = {
   report: { title: 'Загальний', render: viewReport },
   days: { title: 'Звіт по днях', render: viewDays },
   settings: { title: 'Налаштування', render: viewSettings },
+  subs: { title: 'Регулярні платежі', render: viewSubs },
+  reconcile: { title: 'Звірка залишків', render: viewReconcile },
 };
 
 function topbar() {

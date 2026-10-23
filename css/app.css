@@ -527,3 +527,26 @@ details.icon-group > .icon-row { padding-bottom: 10px; }
 .k-debt.late .coin-sub { color: var(--warn-ink); font-weight: 700; }
 .mini-coin.k-debt { background: var(--coin-empty); box-shadow: inset 0 0 0 2px var(--muted); }
 .plan-hint.debt .ico:first-child { color: var(--warn); }
+
+/* регулярні платежі */
+.sub-total { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; padding: 14px 16px; }
+.sub-total div { display: flex; flex-direction: column; gap: 2px; }
+.sub-total span { color: var(--muted); font-size: 13px; }
+.sub-total b { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.sub-row { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.sub-row:last-child { border-bottom: 0; }
+.sub-main { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.sub-text { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.sub-text b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sub-text span { color: var(--muted); font-size: 13px; }
+.sub-sum { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sub-sum.expense { color: var(--minus); }
+.sub-sum.income { color: var(--plus); }
+.btn.small { min-height: 34px; padding: 4px 10px; font-size: 13px; }
+.fold-card > summary { padding: 12px 16px; color: var(--muted); cursor: pointer; }
+/* звірка залишків */
+.rec-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.rec-row:last-child { border-bottom: 0; }
+.rec-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.rec-name > span:last-child { display: flex; flex-direction: column; min-width: 0; }
+.rec-row .field { width: 40%; max-width: 160px; text-align: right; }
