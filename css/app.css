@@ -651,3 +651,10 @@ details.icon-group > .icon-row { padding-bottom: 10px; }
 /* екран суми з цілі: скільки там є */
 .amt-avail { align-self: flex-end; margin: 2px 0 0; padding: 4px 10px; border: 0; border-radius: 12px; background: color-mix(in srgb, var(--goal) 18%, transparent); color: var(--goal-ink); font-size: 13px; font-weight: 600; cursor: pointer; }
 .amt-avail[hidden] { display: none; }
+
+/* Налаштування → «Сховані монети» */
+.hidden-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+.hidden-row:first-of-type { border-top: 0; }
+.hidden-name { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.hidden-name b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hidden-row .btn { flex: none; width: auto; padding-inline: 12px; }

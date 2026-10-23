@@ -1713,6 +1713,7 @@ function viewSettings() {
         h('button', { type: 'button', class: 'btn', onClick: exportBackup }, icon('archive'), 'Зберегти копію'),
         h('button', { type: 'button', class: 'btn', onClick: () => file.click() }, icon('undo'), 'Відновити')),
       file),
+    hiddenCard(),
     h('section', { class: 'card set-card' },
       h('h2', {}, 'Почати з чистого'),
       h('p', { class: 'muted small' }, Sync.syncOn()
@@ -1720,6 +1721,54 @@ function viewSettings() {
         : 'Стерти всі монети й операції на цьому телефоні. Лишаться стартові монети.'),
       h('button', { type: 'button', class: 'btn danger', onClick: wipeAll }, icon('close'), 'Стерти всі дані')),
     aboutCard());
+}
+
+/** Сховані монети: повернути (сховав помилково) чи видалити разом з операціями. Нема схованих — картки нема. */
+function hiddenCard() {
+  const list = state.coins.filter((c) => c.archived).sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name, 'uk'));
+  if (!list.length) return null;
+  const opsOf = (c) => state.ops.filter((o) => o.from === c.id || o.to === c.id);
+  const restore = async (c) => {
+    await save({ coins: { put: [{ ...c, archived: false }] } }, { redraw: false });
+    toast(`«${c.name}» повернуто`);
+    render();
+  };
+  const remove = (c) => {
+    const ops = opsOf(c);
+    // Без операцій залишки інших рахунків зміняться: стерта витрата «повертає» гроші на рахунок, з якого платили
+    const shift = new Map();
+    for (const o of ops) {
+      const [other, d] = o.from === c.id ? [o.to, -amountIn(o)] : [o.from, o.amount];
+      const oc = coin(other);
+      if (oc && oc.id !== c.id && ['account', 'goal', 'debt'].includes(oc.kind)) shift.set(oc, (shift.get(oc) ?? 0) + d);
+    }
+    const moved = [...shift].filter(([, d]) => Math.abs(d) >= 0.01);
+    sheet(`Видалити «${c.name}»?`, h('div', { class: 'form' },
+      h('p', {}, ops.length
+        ? `Разом з монетою зникнуть її операції: ${ops.length} — з історії, звітів і «Витрати» за ті місяці.`
+        : 'Операцій у монети немає — більше нічого не зміниться.'),
+      moved.length ? h('p', { class: 'minus' }, `Зміняться залишки: ${moved.map(([oc, d]) => `${oc.name} ${d > 0 ? '+' : '−'}${M.money(d, oc.currency)}`).join(', ')}.`) : null,
+      ops.length ? h('p', { class: 'muted small' }, 'Якщо просто не хочеш бачити монету — нічого не роби: схованою вона нічому не заважає.') : null,
+      h('div', { class: 'btn-grid' },
+        h('button', {
+          type: 'button', class: 'btn danger', onClick: async () => {
+            closeSheet();
+            await save({ coins: { del: [c.id] }, ops: { del: ops.map((o) => o.id) } }, { redraw: false });
+            toast(`«${c.name}» видалено`);
+            render();
+          },
+        }, icon('close'), 'Видалити'),
+        h('button', { type: 'button', class: 'btn', onClick: () => closeSheet() }, 'Скасувати'))));
+  };
+  return h('section', { class: 'card set-card' },
+    h('h2', {}, 'Сховані монети'),
+    h('p', { class: 'muted small' }, 'Їх немає на головній, але операції лишаються й рахуються. Сховав помилково — «Повернути».'),
+    list.map((c) => h('div', { class: 'hidden-row' },
+      miniCoin(c),
+      h('span', { class: 'hidden-name' }, h('b', {}, c.name),
+        h('span', { class: 'muted small' }, `${M.KINDS[c.kind]} · операцій: ${opsOf(c).length}${['account', 'goal', 'debt'].includes(c.kind) ? ` · ${coinMoney(balance(c), c.currency)}` : ''}`)),
+      h('button', { type: 'button', class: 'btn', onClick: () => restore(c) }, 'Повернути'),
+      h('button', { type: 'button', class: 'icon-btn', 'aria-label': `Видалити «${c.name}»`, onClick: () => remove(c) }, icon('close')))));
 }
 
 /**
