@@ -299,6 +299,13 @@ function pager(key, items, perPage, cls) {
   return h('div', { class: `pager ${cls}` }, track, dots);
 }
 
+/** Рядок на головній: заплановані повтори, яким уже пора, — тап веде в стрічку. */
+function planHint() {
+  const n = dueCount();
+  if (!n || editing()) return null;
+  return h('button', { type: 'button', class: 'plan-hint', onClick: () => go('feed') }, icon('refresh'), `До проведення: ${n}`, icon('next'));
+}
+
 function viewMain() {
   const ym = M.monthOf(M.ymd());
   const incomeOpen = recall('income-open') === '1';
@@ -307,6 +314,7 @@ function viewMain() {
   return h('div', { class: `main${editing() ? ' editing' : ''}` },
     incomeOpen ? pager('income', [...coinsOf('income').map((c) => coinEl(c, ym)), addCoinEl('income')], 4, 'coin-row incomes') : null,
     pager('account', [...coinsOf('account').map((c) => coinEl(c, ym)), addCoinEl('account')], 4, 'coin-row accounts'),
+    planHint(),
     pager('expense', [...grid.map((c) => coinEl(c, ym)), addCoinEl('expense')], 16, 'expenses'),
     state.ops.length ? null : h('p', { class: 'muted small main-hint' },
       'Тягни монету пальцем: дохід — на рахунок, рахунок — на витрату чи інший рахунок. Тап — історія монети, довге натискання — змінити.'));
@@ -490,22 +498,27 @@ const allTags = () => [...new Set(state.ops.flatMap((op) => op.tags ?? []))].sor
  * Введення суми після перетягування (op — правка наявної операції).
  * Різні валюти «звідки» й «куди» — два рядки; другий рахується за курсом, поки його не змінили руками.
  */
-function openAmount({ from, to, op = null }) {
+function openAmount({ from, to, op = null, preset = null }) {
+  // preset — запланований повтор: поля з правила, зберігається новою операцією з fromRule
+  const base = op ?? preset;
   // Звідки й куди можна змінити тапом по монеті вгорі — тому не const
   let src = coinOr(from);
   let dst = coinOr(to);
   let two = src.currency !== dst.currency;
   const d = {
-    a: op ? M.toExpr(op.amount) : '',
-    b: op && two ? M.toExpr(amountIn(op)) : '',
-    bOwn: Boolean(op && two),
-    bTyped: Boolean(op && two),
+    a: base ? M.toExpr(base.amount) : '',
+    b: base && two ? M.toExpr(amountIn(base)) : '',
+    bOwn: Boolean(base && two),
+    bTyped: Boolean(base && two),
     active: 'a',
-    tags: [...(op?.tags ?? [])],
-    comment: op?.comment ?? '',
-    date: op?.date ?? M.ymd(),
+    tags: [...(base?.tags ?? [])],
+    comment: base?.comment ?? '',
+    date: preset ? (preset.date > M.ymd() ? M.ymd() : preset.date) : (op?.date ?? M.ymd()),
     panel: null,
+    repeat: { every: op?.repeat?.every ?? '', until: op?.repeat?.until ?? '' },
   };
+  // Повтор задається в операції-правилі; проведений повтор свого не має
+  const canRepeat = !preset && !op?.fromRule;
   const autoB = () => M.round2(M.calc(d.a) * rate(src.currency) / rate(dst.currency));
 
   const lineA = h('button', { type: 'button', class: 'amt-line', onClick: () => { d.active = 'a'; paint(); } });
@@ -527,8 +540,9 @@ function openAmount({ from, to, op = null }) {
     const expr = d.active === 'a' ? d.a : d.b;
     const v = M.calc(expr);
     res.textContent = M.hasOp(expr) ? (Number.isNaN(v) ? 'помилка' : `= ${M.num(v)}`) : '';
-    note.textContent = [d.tags.map((t) => `#${t}`).join(' '), d.comment].filter(Boolean).join(' · ');
+    note.textContent = [d.tags.map((t) => `#${t}`).join(' '), d.comment, d.repeat.every ? `⟳ ${M.repeatLabel(d.repeat.every)}${d.repeat.until ? ` до ${M.dateTitle(d.repeat.until)}` : ''}` : ''].filter(Boolean).join(' · ');
     paintTags();
+    pad.querySelector('[aria-label="Повторювати"]')?.classList.toggle('on', Boolean(d.repeat.every));
   };
   const paintTags = () => {
     const sugg = [...new Set([...d.tags, ...tagsFor(to)])].slice(0, 8);
@@ -579,6 +593,9 @@ function openAmount({ from, to, op = null }) {
       tags: d.tags, comment: d.comment.trim(), created: op?.created ?? Date.now(),
     };
     if (two) rec.amountTo = b;
+    if (preset) { rec.fromRule = preset.rule.id; rec.ruleDate = preset.date; }
+    if (op?.fromRule) { rec.fromRule = op.fromRule; rec.ruleDate = op.ruleDate; }
+    if (canRepeat && d.repeat.every) rec.repeat = { every: d.repeat.every, until: d.repeat.until, skip: op?.repeat?.skip ?? [] };
     closeSheet();
     await save({ ops: { put: [rec] } });
     const t = opType(rec);
@@ -609,12 +626,12 @@ function openAmount({ from, to, op = null }) {
       key(',', () => digit(','), 'Кома'), key('0', () => digit('0')), key(icon('backspace'), back, 'Стерти')),
     h('div', { class: 'pad-ops' },
       key(icon('comment'), () => showPanel('comment'), 'Коментар'),
-      key(icon('refresh'), () => toast('Повторювані операції — у наступній версії'), 'Повторювати'),
+      key(icon('refresh'), () => (canRepeat ? showPanel('repeat') : toast('Повтор задається в першій операції — відкрий її')), 'Повторювати'),
       key('−', () => operator('−'), 'Мінус'), key('%', () => operator('%'), 'Відсоток'),
       key('+', () => operator('+'), 'Плюс'), key('×', () => operator('×'), 'Помножити'),
       key('=', equals, 'Дорівнює'), key('÷', () => operator('÷'), 'Поділити')));
 
-  const dates = op
+  const dates = base
     ? h('div', { class: 'dates' }, h('button', {
       type: 'button', onClick: () => pickDate((v) => { d.date = v; dates.firstChild.textContent = M.dateTitle(v); }),
     }, M.dateTitle(d.date)), dateInput)
@@ -627,6 +644,18 @@ function openAmount({ from, to, op = null }) {
   // Теги чи коментар — на місці клавіатури, «Готово» повертає її
   const showPanel = (kind) => {
     d.panel = kind;
+    if (kind === 'repeat') {
+      const until = h('input', { type: 'date', class: 'field', value: d.repeat.until, min: d.date, 'aria-label': 'Повторювати до' });
+      lower.replaceChildren(h('div', { class: 'amt-panel form' },
+        h('p', { class: 'flabel' }, 'Повторювати'),
+        chips(M.REPEATS, d.repeat.every, (v) => { d.repeat.every = v; }),
+        h('label', { class: 'flabel' }, 'До (не обов’язково)'), until,
+        h('p', { class: 'muted small' }, 'Наступні повтори з’являться в стрічці блідими: свайп вправо — провести, вліво — пропустити.'),
+        h('div', { class: 'btn-grid' }, h('button', {
+          type: 'button', class: 'btn primary', onClick: () => { d.repeat.until = d.repeat.every ? until.value : ''; hidePanel(); },
+        }, icon('check'), 'Готово'))));
+      return;
+    }
     if (kind === 'comment') {
       const ta = h('textarea', { rows: 3, maxlength: 200, placeholder: 'Наприклад: Екофлоу', class: 'field' }, d.comment);
       lower.replaceChildren(h('div', { class: 'amt-panel form' },
@@ -728,8 +757,19 @@ function opRow(op) {
   const v = t === 'income' ? amountIn(op) : op.amount;
   const cur = t === 'income' ? dst.currency : src.currency;
   const sign = t === 'expense' ? '− ' : t === 'income' ? '+ ' : '';
-  const note = [(op.tags ?? []).map((x) => `#${x}`).join(' '), op.comment].filter(Boolean);
+  const every = op.plan ? op.rule.repeat.every : op.repeat?.every;
+  const note = [(op.tags ?? []).map((x) => `#${x}`).join(' '), op.comment, every ? `⟳ ${M.repeatLabel(every)}` : ''].filter(Boolean);
   const second = op.amountTo != null && t === 'transfer' ? ` → ${M.money(op.amountTo, dst.currency)}` : '';
+  // Запланований повтор: тап — провести з правкою суми, свайп вправо — провести як є, вліво — пропустити чи зупинити
+  if (op.plan) {
+    const row = h('button', { type: 'button', class: `op-row plan${op.date <= M.ymd() ? ' due' : ''}`, onClick: () => openAmount({ from: op.from, to: op.to, preset: op }) },
+      h('span', { class: 'op-ends' }, h('span', { class: 'op-from' }, src.name), h('span', { class: 'op-to' }, dst.name)),
+      h('span', { class: 'op-right' },
+        h('span', { class: `op-sum ${t}` }, M.money(v, cur, { sign }) + second),
+        note.map((x) => h('span', { class: 'op-note' }, x)),
+        h('span', { class: 'op-note plan-tag' }, op.date <= M.ymd() ? 'провести →' : 'заплановано')));
+    return swipeRow(row, { onLeft: () => planMenu(op), onRight: () => confirmPlan(op), labels: ['Провести', 'Пропустити'] });
+  }
   const row = h('button', { type: 'button', class: 'op-row', onClick: () => openAmount({ from: op.from, to: op.to, op }) },
     h('span', { class: 'op-ends' }, h('span', { class: 'op-from' }, src.name), h('span', { class: 'op-to' }, dst.name)),
     h('span', { class: 'op-right' },
@@ -747,10 +787,10 @@ async function deleteOp(op) {
  * Свайп рядка: вліво — onLeft (видалити), вправо — onRight (змінити). Спрацьовує далі третини ширини:
  * короткий рух — це ще прокрутка. Після свайпу клік, що приходить слідом, не відкриває операцію.
  */
-function swipeRow(row, { onLeft, onRight }) {
+function swipeRow(row, { onLeft, onRight, labels = null }) {
   const wrap = h('div', { class: 'swipe-row' },
-    h('div', { class: 'swipe-bg edit', 'aria-hidden': 'true' }, icon('pen'), 'Змінити'),
-    h('div', { class: 'swipe-bg del', 'aria-hidden': 'true' }, 'Видалити', icon('trash')),
+    h('div', { class: 'swipe-bg edit', 'aria-hidden': 'true' }, icon(labels ? 'check' : 'pen'), labels?.[0] ?? 'Змінити'),
+    h('div', { class: 'swipe-bg del', 'aria-hidden': 'true' }, labels?.[1] ?? 'Видалити', icon(labels ? 'skip' : 'trash')),
     row);
   let start = null;
   let dx = 0;
@@ -798,6 +838,66 @@ function swipeRow(row, { onLeft, onRight }) {
   return wrap;
 }
 
+// Скільки прострочених повторів одного правила показувати: щоденне, забуте на рік, не завалить стрічку
+const PLAN_BACKLOG = 10;
+
+/**
+ * Заплановані, ще не проведені повтори — віртуальні рядки стрічки: { ...операція-правило, date, plan: true, rule }.
+ * Проведений повтор — звичайна операція з fromRule/ruleDate; пропущений — дата в rule.repeat.skip.
+ */
+function planned() {
+  const today = M.ymd();
+  const out = [];
+  for (const rule of state.ops) {
+    if (!rule.repeat?.every) continue;
+    const done = new Set(state.ops.filter((o) => o.fromRule === rule.id).map((o) => o.ruleDate));
+    const skip = new Set(rule.repeat.skip ?? []);
+    const dates = M.repeatDates(rule.date, rule.repeat.every, rule.repeat.until, today).filter((x) => !done.has(x) && !skip.has(x));
+    const due = dates.filter((x) => x <= today).slice(-PLAN_BACKLOG);
+    const next = dates.filter((x) => x > today).slice(0, 1);
+    for (const date of [...due, ...next]) {
+      out.push({ ...rule, id: `plan:${rule.id}:${date}`, date, plan: true, rule, repeat: undefined, created: 0 });
+    }
+  }
+  return out;
+}
+
+const dueCount = () => planned().filter((p) => p.date <= M.ymd()).length;
+
+/** Провести повтор як є (свайп вправо): дата — запланована, але не в майбутньому. */
+async function confirmPlan(p) {
+  const rec = {
+    id: uid(), from: p.from, to: p.to, amount: p.amount, date: p.date > M.ymd() ? M.ymd() : p.date,
+    tags: [...(p.tags ?? [])], comment: p.comment ?? '', created: Date.now(), fromRule: p.rule.id, ruleDate: p.date,
+  };
+  if (p.amountTo != null) rec.amountTo = p.amountTo;
+  await save({ ops: { put: [rec] } });
+  toast(`Проведено: ${coinOr(p.to).name}`, { label: 'Скасувати', run: () => save({ ops: { del: [rec.id] } }) });
+}
+
+/** Свайп вліво по повтору: пропустити лише цей чи зупинити все правило. */
+function planMenu(p) {
+  const rule = p.rule;
+  const put = (repeat) => save({ ops: { put: [{ ...rule, repeat: { ...rule.repeat, ...repeat } }] } });
+  sheet('Запланована операція', h('div', { class: 'form' },
+    h('p', {}, `${coinOr(p.from).name} → ${coinOr(p.to).name}, ${M.dateTitle(p.date)}. Повтор ${M.repeatLabel(rule.repeat.every)}.`),
+    h('div', { class: 'btn-grid' },
+      h('button', {
+        type: 'button', class: 'btn', onClick: async () => {
+          closeSheet();
+          await put({ skip: [...(rule.repeat.skip ?? []), p.date] });
+          toast('Пропущено', { label: 'Скасувати', run: () => save({ ops: { put: [{ ...rule }] } }) });
+        },
+      }, icon('skip'), 'Пропустити цю'),
+      h('button', {
+        type: 'button', class: 'btn danger', onClick: async () => {
+          closeSheet();
+          await put({ until: M.addDays(p.date, -1) });
+          toast('Повтор зупинено', { label: 'Скасувати', run: () => save({ ops: { put: [{ ...rule }] } }) });
+        },
+      }, icon('close'), 'Зупинити повтор'))));
+}
+
 const byNewest = (a, b) => b.date.localeCompare(a.date) || (b.created ?? b.updated ?? 0) - (a.created ?? a.updated ?? 0);
 
 /**
@@ -808,6 +908,7 @@ function coinDayFoot(c, dayOps) {
   if (!c) return null;
   let v = 0;
   for (const op of dayOps) {
+    if (op.plan) continue;
     if (op.to === c.id) v += amountIn(op);
     if (op.from === c.id) v -= op.amount;
   }
@@ -819,7 +920,7 @@ function coinDayFoot(c, dayOps) {
 }
 
 function viewFeed() {
-  const ops = state.ops.filter((op) => !feedCoin || op.from === feedCoin || op.to === feedCoin).sort(byNewest);
+  const ops = [...state.ops, ...planned()].filter((op) => !feedCoin || op.from === feedCoin || op.to === feedCoin).sort(byNewest);
   if (!ops.length) return h('p', { class: 'empty' }, feedCoin ? 'У цієї монети ще немає операцій' : 'Ще немає операцій — потягни монету на головній');
   const days = [...new Set(ops.map((op) => op.date))];
   const shown = days.slice(0, feedDays);

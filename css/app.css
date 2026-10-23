@@ -497,3 +497,15 @@ details.icon-group > .icon-row { padding-bottom: 10px; }
 /* ряд рахунків закріплений угорі: витрати гортаються під ним */
 .main .accounts { position: sticky; top: var(--topbar-h, 60px); z-index: 5; }
 .main .accounts.stuck { box-shadow: 0 6px 10px -6px rgb(0 0 0 / .35); }
+
+/* повтори: заплановані в стрічці — бліді; на головній — рядок «До проведення» */
+.op-row.plan { opacity: .55; }
+.op-row.plan.due { opacity: .75; }
+.plan-tag { color: var(--brand); font-weight: 600; }
+.pad-ops button.on { color: var(--brand); }
+.plan-hint {
+  display: flex; align-items: center; gap: 8px; width: calc(100% - 24px); margin: 10px 12px 0; padding: 10px 14px;
+  border: 0; border-radius: 10px; background: var(--surface-2); color: var(--text); font: inherit; font-size: 15px; text-align: left; cursor: pointer;
+}
+.plan-hint .ico:first-child { color: var(--brand); }
+.plan-hint .ico:last-child { margin-left: auto; color: var(--muted); }

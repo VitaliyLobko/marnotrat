@@ -43,6 +43,35 @@ export function dayHead(date, today = ymd()) {
   return `${WEEKDAYS[parseYmd(date).getDay()]}, ${tail}`;
 }
 
+// ---------- повтор операцій ----------
+
+export const REPEATS = [['', 'Не повторювати'], ['day', 'Щодня'], ['week', 'Щотижня'], ['month', 'Щомісяця'], ['year', 'Щороку']];
+export const repeatLabel = (every) => REPEATS.find(([k]) => k === every)?.[1].toLowerCase() ?? '';
+
+/**
+ * k-та дата повтору від base. Місяць і рік рахуються від base, а не від попередньої дати:
+ * 31 січня → 28 лютого → 31 березня, без «сповзання» на 28-ме.
+ */
+export function repeatDate(base, every, k) {
+  if (every === 'day') return addDays(base, k);
+  if (every === 'week') return addDays(base, 7 * k);
+  const ym = addMonths(monthOf(base), every === 'year' ? 12 * k : k);
+  const last = new Date(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), 0).getDate();
+  return `${ym}-${pad2(Math.min(Number(base.slice(8, 10)), last))}`;
+}
+
+/** Дати повтору після base до until включно: усі, що вже настали (≤ today), і одна наступна. */
+export function repeatDates(base, every, until, today = ymd(), cap = 2000) {
+  const out = [];
+  for (let k = 1; k <= cap; k += 1) {
+    const d = repeatDate(base, every, k);
+    if (until && d > until) break;
+    out.push(d);
+    if (d > today) break;
+  }
+  return out;
+}
+
 // ---------- гроші ----------
 
 export const CURRENCIES = [['UAH', '₴ грн'], ['USD', '$ долар'], ['EUR', '€ євро']];
