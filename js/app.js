@@ -118,9 +118,9 @@ async function runSync({ gesture = false, loud = false } = {}) {
 
 // ---------- підрахунки ----------
 
-function balance(acc) {
+function balance(acc, ops = state.ops) {
   let v = acc.start || 0;
-  for (const op of state.ops) {
+  for (const op of ops) {
     if (op.to === acc.id) v += amountIn(op);
     if (op.from === acc.id) v -= op.amount;
   }
@@ -419,8 +419,90 @@ async function reorder(src, dstId) {
   if (put.length) await save({ coins: { put } });
 }
 
+// ---------- цілі й борги: не більше, ніж є ----------
+
+/**
+ * Перевірка змін операцій (put — нові чи змінені, del — id видалених). Повертає текст, чому не можна, або null.
+ * Ціль: у мінус не йде — забрати можна лише відкладене.
+ * Борг: при новій чи зміненій операції не переходить через нуль — повернути можна лише те, що винні
+ * (видалення боргових операцій дозволене: це прибирання помилок).
+ * Монета, що вже була «зламана» (старі дані), правок, які її не погіршують, не блокує.
+ */
+function holdBreak(put = [], del = []) {
+  const ids = new Set([...put.map((o) => o.id), ...del]);
+  const without = state.ops.filter((o) => !ids.has(o.id));
+  const next = [...without, ...put];
+  const touched = new Set([...put, ...state.ops.filter((o) => ids.has(o.id))].flatMap((o) => [o.from, o.to]));
+  for (const id of touched) {
+    const c = coin(id);
+    if (c?.kind === 'goal') {
+      const after = balance(c, next);
+      if (after < -0.005 && after < balance(c) - 0.005) {
+        const avail = Math.max(0, balance(c, without));
+        return avail > 0 && put.length
+          ? `У цілі «${c.name}» лише ${M.money(avail, c.currency)} — більше не забереш`
+          : `Не можна: у цілі «${c.name}» стане мінус — з неї вже забрали ці гроші`;
+      }
+    }
+    if (c?.kind === 'debt' && put.length) {
+      const base = balance(c, without);
+      const after = balance(c, next);
+      if (Math.abs(base) >= 0.01 && Math.abs(after) >= 0.01 && Math.sign(base) !== Math.sign(after)) {
+        return base > 0
+          ? `«${c.name}» винен тобі лише ${M.money(base, c.currency)} — більше не повернеш. Позичив ще — це окрема операція`
+          : `Ти винен «${c.name}» лише ${M.money(-base, c.currency)} — більше не віддаси. Дав ще в борг — це окрема операція`;
+      }
+    }
+  }
+  return null;
+}
+
+/** Не можна — сказати чому й струснути телефоном; true, якщо зміну зупинено. */
+function refuse(put, del) {
+  const why = holdBreak(put, del);
+  if (!why) return false;
+  toast(why);
+  vibrate([30, 40, 30]);
+  return true;
+}
+
+/**
+ * ✕ на монеті, що тримає гроші: ціль — повернути на рахунок (у «Баланс» вона не входить, інакше гроші зникли б);
+ * рахунок — перенести на інший або сховати з грошима; відкритий борг — підтвердити.
+ */
+function removeHolder(c) {
+  const left = balance(c);
+  const others = coinsOf('account').filter((a) => a.id !== c.id);
+  const move = async (acc) => {
+    close();
+    const op = { id: uid(), from: c.id, to: acc.id, amount: left, date: M.ymd(), tags: [], comment: `Закрито «${c.name}»`, created: Date.now() };
+    if (acc.currency !== c.currency) op.amountTo = M.round2(left * rate(c.currency) / rate(acc.currency));
+    await save({ ops: { put: [op] }, coins: { put: [{ ...c, archived: true }] } });
+    toast(`${M.money(left, c.currency)} → ${acc.name}, «${c.name}» сховано`, {
+      label: 'Скасувати', run: () => save({ ops: { del: [op.id] }, coins: { put: [{ ...c }] } }),
+    });
+  };
+  const hide = async () => {
+    close();
+    await save({ coins: { put: [{ ...c, archived: true }] } });
+    toast(`«${c.name}» сховано`, { label: 'Скасувати', run: () => save({ coins: { put: [{ ...c }] } }) });
+  };
+  const text = c.kind === 'goal' ? `У цілі відкладено ${M.money(left, c.currency)}. На який рахунок їх повернути?`
+    : c.kind === 'account' ? `На рахунку ${M.money(left, c.currency)}. Перенести їх на інший рахунок? Якщо просто сховати — гроші лишаться в «Баланс», але рахунку на головній не буде.`
+      : `${left > 0 ? `«${c.name}» ще винен тобі` : `Ти ще винен «${c.name}»`} ${M.money(Math.abs(left), c.currency)}. Сховати борг усе одно?`;
+  const close = sheet(`Прибрати «${c.name}»?`, h('div', { class: 'form' },
+    h('p', {}, text),
+    c.kind !== 'debt' && others.length
+      ? h('div', { class: 'pick-coins' }, others.map((a) => h('button', { type: 'button', class: 'pick-coin', onClick: () => move(a) }, miniCoin(a), h('span', {}, a.name))))
+      : null,
+    h('div', { class: 'btn-grid' },
+      h('button', { type: 'button', class: 'btn', onClick: () => close() }, 'Скасувати'),
+      c.kind !== 'goal' ? h('button', { type: 'button', class: 'btn danger', onClick: hide }, 'Сховати') : null)));
+}
+
 /** ✕ на монеті: без операцій — видалити, з операціями — сховати (операції лишаються). */
 async function removeCoin(orig) {
+  if (['goal', 'account', 'debt'].includes(orig.kind) && Math.abs(balance(orig)) >= 0.01) { removeHolder(orig); return; }
   const used = state.ops.some((op) => op.from === orig.id || op.to === orig.id);
   if (used) {
     await save({ coins: { put: [{ ...orig, archived: true }] } });
@@ -622,6 +704,8 @@ function openAmount({ from, to, op = null, preset = null }) {
   const lineA = h('button', { type: 'button', class: 'amt-line', onClick: () => { d.active = 'a'; paint(); } });
   const lineB = h('button', { type: 'button', class: 'amt-line second', onClick: () => { d.active = 'b'; if (!d.bOwn) { d.b = M.toExpr(autoB()); d.bOwn = true; } paint(); } });
   const res = h('div', { class: 'amt-res' });
+  // З цілі — видно, скільки там є, і тапом забрати все
+  const avail = h('button', { type: 'button', class: 'amt-avail' });
   const note = h('div', { class: 'amt-note' });
   const tagBar = h('div', { class: 'amt-tags' });
   const lower = h('div', {});
@@ -638,6 +722,10 @@ function openAmount({ from, to, op = null, preset = null }) {
     const expr = d.active === 'a' ? d.a : d.b;
     const v = M.calc(expr);
     res.textContent = M.hasOp(expr) ? (Number.isNaN(v) ? 'помилка' : `= ${M.num(v)}`) : '';
+    const inGoal = src.kind === 'goal' ? Math.max(0, balance(src, state.ops.filter((o) => o.id !== recId))) : 0;
+    avail.hidden = src.kind !== 'goal';
+    avail.textContent = `у цілі ${M.money(inGoal, src.currency)} · забрати все`;
+    avail.onclick = () => { d.a = M.toExpr(inGoal); d.active = 'a'; d.b = ''; d.bOwn = false; d.bTyped = false; paint(); };
     note.textContent = [d.tags.map((t) => `#${t}`).join(' '), d.comment, d.repeat.every ? `⟳ ${M.repeatLabel(d.repeat.every)}${d.repeat.until ? ` до ${M.dateTitle(d.repeat.until)}` : ''}` : '',
       d.warranty ? `гарантія до ${dmy(d.warranty)}` : '', d.photos.length ? `фото: ${d.photos.length}` : ''].filter(Boolean).join(' · ');
     paintTags();
@@ -700,12 +788,21 @@ function openAmount({ from, to, op = null, preset = null }) {
     if (preset) { rec.fromRule = preset.rule.id; rec.ruleDate = preset.date; }
     if (op?.fromRule) { rec.fromRule = op.fromRule; rec.ruleDate = op.ruleDate; }
     if (canRepeat && d.repeat.every) rec.repeat = { every: d.repeat.every, until: d.repeat.until, skip: op?.repeat?.skip ?? [] };
+    if (refuse([rec])) return;
+    const accBefore = src.kind === 'account' ? balance(src) : 0;
+    const goalBefore = dst.kind === 'goal' ? balance(dst) : 0;
     closeSheet();
     await save({ ops: { put: [rec] } });
     const t = opType(rec);
     const sign = t === 'expense' ? '−' : t === 'income' ? '+' : '';
-    const what = `${dst.name}: ${M.money(t === 'income' ? amountIn(rec) : rec.amount, t === 'income' ? dst.currency : src.currency, { sign })}`;
-    toast(op ? 'Операцію змінено' : what, {
+    // Поповнення, яке дотягнуло ціль до суми, — святкуємо
+    const reached = dst.kind === 'goal' && dst.budget > 0 && goalBefore < dst.budget && balance(coinOr(rec.to)) >= dst.budget;
+    if (reached) vibrate([20, 60, 20, 60, 40]);
+    const accNow = src.kind === 'account' ? balance(coinOr(rec.from)) : 0;
+    const minus = src.kind === 'account' && accNow < 0 && accNow < accBefore ? ` · ${src.name} у мінусі: ${M.money(accNow, src.currency, { sign: '−' })}` : '';
+    const what = (reached ? `Ціль «${dst.name}» зібрано! 🎉`
+      : `${dst.name}: ${M.money(t === 'income' ? amountIn(rec) : rec.amount, t === 'income' ? dst.currency : src.currency, { sign })}`) + minus;
+    toast(op ? `Операцію змінено${minus}` : what, {
       label: 'Скасувати',
       run: () => save(op ? { ops: { put: [{ ...op }] } } : { ops: { del: [rec.id] } }),
     });
@@ -713,6 +810,8 @@ function openAmount({ from, to, op = null, preset = null }) {
     if (slk) offerJournal(rec, slk);
   };
   const remove = async () => {
+    // Не можна — екран лишається відкритим, видно, про що мова
+    if (refuse([], [op.id])) return;
     closeSheet();
     await deleteOp(op);
   };
@@ -849,7 +948,7 @@ function openAmount({ from, to, op = null, preset = null }) {
       route,
       op ? h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Видалити', onClick: remove }, icon('trash')) : null,
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Зберегти', onClick: () => store() }, icon('check'))),
-    h('div', { class: 'amt-body' }, lineA, lineB, res, note));
+    h('div', { class: 'amt-body' }, lineA, lineB, res, avail, note));
   lower.replaceChildren(pad, dates);
   sheet(`${src.name} → ${dst.name}`, [screen.firstChild, screen.lastChild, tagBar, lower], { cls: 'screen', bare: true });
   paintRoute();
@@ -904,6 +1003,7 @@ function opRow(op) {
 }
 
 async function deleteOp(op) {
+  if (refuse([], [op.id])) return;
   await save({ ops: { del: [op.id] } });
   toast('Операцію видалено', { label: 'Скасувати', run: () => save({ ops: { put: [{ ...op }] } }) });
 }
@@ -996,6 +1096,7 @@ async function confirmPlan(p) {
     tags: [...(p.tags ?? [])], comment: p.comment ?? '', created: Date.now(), fromRule: p.rule.id, ruleDate: p.date,
   };
   if (p.amountTo != null) rec.amountTo = p.amountTo;
+  if (refuse([rec])) return;
   await save({ ops: { put: [rec] } });
   toast(`Проведено: ${coinOr(p.to).name}`, { label: 'Скасувати', run: () => save({ ops: { del: [rec.id] } }) });
 }
@@ -1459,7 +1560,7 @@ function editCoin(orig, kind = orig?.kind) {
     }
     if (holds) {
       // Залишок задають «скільки зараз»: різницю переносимо в стартовий, операції не чіпаємо
-      const now = Number(start.value) || 0;
+      const now = kind === 'goal' ? Math.max(0, Number(start.value) || 0) : Number(start.value) || 0;
       rec.start = M.round2((d.start || 0) + now - (orig ? balance(orig) : 0));
     }
     closeSheet();
@@ -1478,7 +1579,8 @@ function editCoin(orig, kind = orig?.kind) {
     kind === 'goal' ? h('p', { class: 'muted small' }, 'Відкладене: гроші з рахунку переносиш сюди перетягуванням. У «Баланс» і у витрати не входять.') : null,
     debt ? h('p', { class: 'muted small' }, 'Дав у борг — тягни рахунок на цю монету; позичив чи тобі повертають — тягни її на рахунок. Ні витратою, ні доходом це не рахується.') : null,
     h('label', { class: 'flabel' }, debt ? 'Хто' : 'Назва'), name,
-    kind !== 'expense' || !used ? [h('p', { class: 'flabel' }, 'Валюта'), chips(M.CURRENCIES, d.currency, (v) => { d.currency = v; })] : null,
+    !used ? [h('p', { class: 'flabel' }, 'Валюта'), chips(M.CURRENCIES, d.currency, (v) => { d.currency = v; })]
+      : kind !== 'expense' ? h('p', { class: 'muted small' }, `Валюта: ${d.currency} — змінити не можна, бо вже є операції`) : null,
     debt ? [
       h('p', { class: 'flabel' }, 'Зараз'), chips([['owed', 'Мені винні'], ['owe', 'Я винен']], dir.v, (v) => { dir.v = v; }),
       h('label', { class: 'flabel' }, 'Сума боргу зараз (0 — почнеш з перетягування)'), debtSum,

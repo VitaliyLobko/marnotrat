@@ -646,3 +646,7 @@ details.icon-group > .icon-row { padding-bottom: 10px; }
 .empty-state p { margin: 0; max-width: 300px; color: var(--muted); line-height: 1.45; }
 .empty-ico { display: grid; place-items: center; width: 72px; height: 72px; border-radius: 50%; background: color-mix(in srgb, var(--brand) 14%, transparent); color: var(--brand); }
 .empty-ico svg { width: 34px; height: 34px; stroke-width: 1.6; }
+
+/* екран суми з цілі: скільки там є */
+.amt-avail { align-self: flex-end; margin: 2px 0 0; padding: 4px 10px; border: 0; border-radius: 12px; background: color-mix(in srgb, var(--goal) 18%, transparent); color: var(--goal-ink); font-size: 13px; font-weight: 600; cursor: pointer; }
+.amt-avail[hidden] { display: none; }
