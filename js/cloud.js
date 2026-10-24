@@ -18,7 +18,7 @@ function set(k, v) {
 
 /**
  * Позначки обміну застосунку: since — час бота (що вже забрали), pushed — свій час (що вже віддали), last — коли;
- * owner — чий це бот: інша адреса чи ключ — обмін з нуля.
+ * owner — чий це бот: інша адреса — інша база, обмін з нуля (новий ключ до тієї ж адреси — та сама база).
  */
 export function cursors(prefix) {
   return {
@@ -28,10 +28,10 @@ export function cursors(prefix) {
     reset: () => { for (const k of ['since', 'pushed', 'last']) set(`${prefix}:cloud-${k}`, null); },
     // Записи зі старими мітками (злиття з файлу чи Диска) — наступний обмін віддасть усе своє ще раз
     rewind: () => set(`${prefix}:cloud-pushed`, null),
-    own(url, key) {
-      if (get(`${prefix}:cloud-owner`) === `${url} ${key}`) return;
+    own(url) {
+      if (get(`${prefix}:cloud-owner`) === url) return;
       this.reset();
-      set(`${prefix}:cloud-owner`, `${url} ${key}`);
+      set(`${prefix}:cloud-owner`, url);
     },
     commit: (since, pushed) => {
       set(`${prefix}:cloud-since`, since);
@@ -65,7 +65,7 @@ function chunks(list) {
  */
 export async function exchange({ url, key, app, prefix, records, skipPush = false, extra = {} }) {
   const cur = cursors(prefix);
-  cur.own(url, key);
+  cur.own(url);
   // Позначку беремо ДО знімка: запис, змінений під час обміну, поїде наступного разу
   const startedAt = Date.now();
   const pushed = cur.pushed();
@@ -79,7 +79,7 @@ export async function exchange({ url, key, app, prefix, records, skipPush = fals
       headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
       body: JSON.stringify({ app, since: cur.since(), put: parts[i], pull: last, ...extra }),
     });
-    if (!r.ok) throw new Error(r.status === 401 ? 'key' : `HTTP ${r.status}`);
+    if (!r.ok) throw Object.assign(new Error(r.status === 401 ? 'key' : `HTTP ${r.status}`), { status: r.status });
     res = await r.json();
   }
   return { rows: res.rows ?? [], commit: (synced = !skipPush) => cur.commit(res.now, synced ? startedAt : 0) };

@@ -239,6 +239,14 @@ a { color: var(--brand); }
   box-shadow: 0 8px 22px rgb(0 0 0 / .3);
 }
 .main-hint { margin: 4px 16px 24px; text-align: center; }
+.key-note {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin: 8px 12px; padding: 10px 12px;
+  border: 1px solid var(--over-ink); border-radius: 12px; background: color-mix(in srgb, var(--over-ink) 10%, var(--surface)); font-size: 14px;
+}
+.key-note b { color: var(--over-ink); }
+.error-text { color: var(--over-ink); }
+.key-note .btn { min-height: 38px; margin-left: auto; }
+.set-card .error { padding: 0; }
 
 /* ---------- екрани зі списками ---------- */
 
@@ -362,7 +370,7 @@ a { color: var(--brand); }
 
 .form { display: flex; flex-direction: column; gap: 10px; }
 .flabel { margin: 4px 0 0; font-size: 14px; color: var(--muted); }
-.form input[type=text], .form input[type=number], .form textarea, .field {
+.form input[type=text], .form input[type=number], .form input[type=url], .form input[type=password], .form textarea, .field {
   width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 10px;
   background: var(--surface-2); color: var(--text); font: inherit;
 }

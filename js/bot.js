@@ -1,12 +1,12 @@
 // Telegram-бот Хобі-плану шле вечірній підсумок дня й неділі — сюди ж і гроші.
 // Боту їдуть лише підсумки днів у гривнях (витрати, доходи, суми за категоріями) і бюджет місяця —
-// без операцій, рахунків і коментарів. Адреса й ключ — зі спільного bot-settings.json на Google Диску,
-// а поки його нема — з Хобі-плану на цьому телефоні: на github.io обидва застосунки на одному origin.
+// без операцій, рахунків і коментарів. Адреса й ключ — спільні для застосунків на пристрої (bot-key.js),
+// між пристроями — bot-settings.json на Google Диску.
+import * as BK from './bot-key.js';
 
-const HOBBY = { url: 'hobby-planner:bot-url', key: 'hobby-planner:bot-key' };
 const KEYS = {
   off: 'marnotrat:bot-off', last: 'marnotrat:bot-last', sig: 'marnotrat:bot-sig', error: 'marnotrat:bot-error',
-  url: 'marnotrat:bot-url', key: 'marnotrat:bot-key', at: 'marnotrat:bot-at',
+  url: 'marnotrat:bot-url', key: 'marnotrat:bot-key', at: 'marnotrat:bot-at', declined: 'marnotrat:bot-declined',
 };
 // Те саме ще раз не шлемо, але раз на пів години — так: бот бачить, що дані свіжі
 const RESEND_MS = 30 * 60 * 1000;
@@ -23,33 +23,44 @@ function set(k, v) {
 
 const clean = (url, key) => ({ url: (url ?? '').trim().replace(/\/+$/, ''), key: (key ?? '').trim() });
 
-/** Бот: з Диска (from 'drive') або з Хобі-плану на цьому телефоні (from 'hobby'); null — не підключений. */
-export function botConfig() {
-  const own = clean(get(KEYS.url), get(KEYS.key));
-  if (own.url && own.key) return { ...own, from: 'drive' };
-  const hobby = clean(get(HOBBY.url), get(HOBBY.key));
-  return hobby.url && hobby.key ? { ...hobby, from: 'hobby' } : null;
+/** Бот: адреса й ключ, спільні для застосунків на цьому пристрої (bot-key.js); null — не підключений. */
+/** Коли бота від'єднали саме тут (0 — ні): старіші адреса й ключ його назад не підключають. */
+export const declinedAt = () => Number(get(KEYS.declined) || 0);
+
+/** «Від'єднати» — лише в Марнотраті на цьому телефоні; Хобі-план і Вага лишаються з ботом. */
+export function disconnect() {
+  set(KEYS.declined, Date.now());
+  set(KEYS.sig, null);
 }
+
+export function botConfig() {
+  const cfg = BK.current(declinedAt());
+  return cfg ? { url: cfg.url, key: cfg.key, from: 'shared' } : null;
+}
+
+/** Для bot-settings.json на Диску: лише ключ, який бот уже прийняв; null — нести нічого. */
+export const sharedConfig = () => BK.forDrive(declinedAt());
 
 /**
- * Для спільного файлу на Диску: з часом запису з Диска, а з Хобі-плану — з часом 0,
- * щоб будь-який запис з Диска його переміг. null — бот не підключений.
+ * Нові адреса й ключ (вставили тут чи прийшли з Диска) — для всіх застосунків на пристрої.
+ * Інша адреса чи ключ — підсумки підуть боту ще раз, не чекаючи пів години.
  */
-export function sharedConfig() {
-  const cfg = botConfig();
-  if (!cfg) return null;
-  return { url: cfg.url, key: cfg.key, updated: cfg.from === 'drive' ? Number(get(KEYS.at) || 0) : 0 };
-}
-
-/** Новіший запис з Диска. Інша адреса чи ключ — підсумки підуть боту ще раз, не чекаючи пів години. */
-export function setSharedConfig(url, key, at) {
+export function setSharedConfig(url, key, at = Date.now()) {
   const next = clean(url, key);
   const cur = botConfig();
   set(KEYS.url, next.url || null);
   set(KEYS.key, next.key || null);
   set(KEYS.at, at);
+  set(KEYS.declined, null);
+  BK.publish(next.url, next.key, at);
   if (cur?.url !== next.url || cur?.key !== next.key) set(KEYS.sig, null);
 }
+
+/** Бот відкинув усі ключі, що є на пристрої: показати «встав новий ключ». */
+export const keyProblem = () => BK.keyProblem(declinedAt());
+export const isBadKey = BK.isBad;
+export const markOk = BK.markOk;
+export const markBad = BK.markBad;
 
 export const botOn = () => get(KEYS.off) !== '1';
 
@@ -87,13 +98,15 @@ export async function pushBot(payload, { force = false } = {}) {
       headers: { authorization: `Bearer ${cfg.key}`, 'content-type': 'application/json' },
       body: sig,
     });
-    if (!res.ok) throw new Error(res.status === 401 ? 'Ключ бота не підходить — онови його в Хобі-плані' : `Бот: HTTP ${res.status}`);
+    if (res.status === 401) BK.markBad(cfg);
+    else if (res.ok) BK.markOk(cfg);
+    if (!res.ok) throw new Error(res.status === 401 ? 'Ключ доступу не підходить — візьми новий командою /key у Telegram-боті' : `Бот: HTTP ${res.status}`);
     set(KEYS.sig, sig);
     set(KEYS.last, Date.now());
     set(KEYS.error, null);
     return { ok: true };
   } catch (err) {
-    set(KEYS.error, err instanceof TypeError ? 'Немає зв’язку з ботом' : err.message);
+    set(KEYS.error, err instanceof TypeError ? 'Немає зв’язку з сервером' : err.message);
     throw err;
   } finally {
     running = false;

@@ -171,7 +171,7 @@ export async function refreshByGesture() {
   return true;
 }
 
-/** Ключ з натискання без обмеження частоти — для кнопки «Синхронізувати». */
+/** Ключ з натискання без обмеження частоти — для кнопки «Зберегти зараз». */
 export async function ensureToken() {
   if (!tokenValid()) await requestToken('');
 }
@@ -184,7 +184,7 @@ async function api(url, options = {}) {
     dropSharedToken(conf.token);
     conf.token = null;
     store();
-    throw new AuthError('Сесія Google скінчилась — натисни «Синхронізувати»');
+    throw new AuthError('Сесія Google скінчилась — натисни «Зберегти зараз» у розділі Google Диск');
   }
   if (!res.ok) throw Object.assign(new Error(`Google Диск відповів ${res.status}`), { status: res.status });
   return res;
@@ -212,7 +212,7 @@ async function learnEmail() {
  * стартових монет — інакше «Готівка» задвоїлась би). Повертає злитий знімок або null, якщо локально нічого не змінилось.
  */
 export async function syncNow(local, { fresh = false, envelope = {} } = {}) {
-  if (!tokenValid()) throw new AuthError('Потрібно увійти в Google — натисни «Синхронізувати»');
+  if (!tokenValid()) throw new AuthError('Потрібно увійти в Google — натисни «Зберегти зараз» у розділі Google Диск');
   await learnEmail();
   const id = await locate(api, FILE_NAME, conf.fileId);
   conf.fileId = id;
@@ -237,12 +237,31 @@ export async function syncNow(local, { fresh = false, envelope = {} } = {}) {
   return stamp(local) === stamp(merged) ? null : merged;
 }
 
+/** Копія з Диска для «Відновити з Диска»: вміст marnotrat-sync.json або null — файлу ще нема. */
+export async function fetchBackup() {
+  if (!tokenValid()) await requestToken('');
+  const id = await locate(api, FILE_NAME, conf.fileId);
+  return id ? readJson(api, id) : null;
+}
+
 // ---------- спільні налаштування бота ----------
+
+/**
+ * Лише bot-settings.json, без даних: при відкритті й коли бот відкинув ключ — вставлений на іншому пристрої ключ
+ * приходить одразу, а не з добовою копією. Ключ Google мертвий — тихо до наступного разу.
+ */
+let botRoundBusy = null;
+export function botRound() {
+  if (!syncOn() || !navigator.onLine || !tokenValid()) return Promise.resolve();
+  botRoundBusy ??= learnEmail().then(syncBotSettings).catch(() => {}).finally(() => { botRoundBusy = null; });
+  return botRoundBusy;
+}
 
 /** Адреса й ключ бота — спільний bot-settings.json (drive-files.js): новіший з Диска — сюди, свій новіший — на Диск. */
 async function syncBotSettings() {
   conf.botFileId = await syncBotFile(api, conf.botFileId, {
     mine: Bot.sharedConfig(),
+    isBad: Bot.isBadKey,
     apply: (theirs) => {
       Bot.setSharedConfig(theirs.url, theirs.key, theirs.updated);
       window.dispatchEvent(new Event('bot-config'));
