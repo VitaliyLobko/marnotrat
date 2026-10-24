@@ -37,7 +37,23 @@ function recall(key) {
   try { return localStorage.getItem(PREFIX + key); } catch { return null; }
 }
 
-const coin = (id) => state.coins.find((c) => c.id === id);
+// ---------- кеш підрахунків ----------
+
+// save() і синхронізація не правлять масиви state, а підміняють їх — тож кеш живий, доки ті самі масиви
+let memo = { ops: null, coins: null, meta: null, data: {} };
+
+function cached(key, build) {
+  const { ops, coins, meta } = state;
+  if (memo.ops !== ops || memo.coins !== coins || memo.meta !== meta) memo = { ops, coins, meta, data: {} };
+  if (!(key in memo.data)) memo.data[key] = build();
+  return memo.data[key];
+}
+
+const coin = (id) => cached('byId', () => {
+  const byId = new Map();
+  for (const c of state.coins) if (!byId.has(c.id)) byId.set(c.id, c);
+  return byId;
+}).get(id);
 // Режим «Редагування» головної (довге натискання на монету): ✕ і ✎ на монетах, перестановка перетягуванням
 const editing = () => view === 'edit';
 const onMain = () => view === 'main' || view === 'edit';
@@ -118,7 +134,38 @@ async function runSync({ gesture = false, loud = false } = {}) {
 
 // ---------- підрахунки ----------
 
+/**
+ * Рухи монет одним проходом: id → { delta — усе прийшло мінус усе пішло; months — за періодом обліку
+ * { in, out, n — скільки операцій прийшло } }. Порядок додавання — як у state.ops, тож суми ті самі.
+ */
+const moves = () => cached('moves', () => {
+  const out = new Map();
+  const of = (id) => {
+    let m = out.get(id);
+    if (!m) out.set(id, (m = { delta: 0, months: new Map() }));
+    return m;
+  };
+  const month = (m, ym) => {
+    let x = m.months.get(ym);
+    if (!x) m.months.set(ym, (x = { in: 0, out: 0, n: 0 }));
+    return x;
+  };
+  for (const op of state.ops) {
+    const ym = periodOf(op.date);
+    const dst = of(op.to);
+    dst.delta += amountIn(op);
+    const x = month(dst, ym);
+    x.in += amountIn(op);
+    x.n += 1;
+    const src = of(op.from);
+    src.delta -= op.amount;
+    month(src, ym).out += op.amount;
+  }
+  return out;
+});
+
 function balance(acc, ops = state.ops) {
+  if (ops === state.ops) return M.round2((acc.start || 0) + (moves().get(acc.id)?.delta ?? 0));
   let v = acc.start || 0;
   for (const op of ops) {
     if (op.to === acc.id) v += amountIn(op);
@@ -168,13 +215,11 @@ const inMonth = (op, ym) => {
   return op.date >= lo && op.date <= hi;
 };
 
-function monthSpent(c, ym) {
-  return state.ops.reduce((s, op) => (op.to === c.id && inMonth(op, ym) ? s + amountIn(op) : s), 0);
-}
+const monthMoves = (c, ym) => moves().get(c.id)?.months.get(ym);
 
-function monthIncome(c, ym) {
-  return state.ops.reduce((s, op) => (op.from === c.id && inMonth(op, ym) ? s + op.amount : s), 0);
-}
+const monthSpent = (c, ym) => monthMoves(c, ym)?.in ?? 0;
+
+const monthIncome = (c, ym) => monthMoves(c, ym)?.out ?? 0;
 
 /** Як операція міняє гроші на рахунках, у гривнях: дохід +, витрата −, переказ — лише різниця курсів. */
 // Що входить у «Баланс»: рахунки й борги з позначкою «враховувати»; ціль — відкладене, не входить
@@ -191,16 +236,26 @@ function accDelta(op) {
 
 /** Витрати й доходи в гривнях: за день («РРРР-ММ-ДД») чи за період обліку (ключ «РРРР-ММ»). */
 function totals(key) {
-  let expense = 0;
-  let income = 0;
-  const hit = key.length === 7 ? (op) => inMonth(op, key) : (op) => op.date === key;
-  for (const op of state.ops) {
-    if (!hit(op)) continue;
-    const t = opType(op);
-    if (t === 'expense') expense += toUah(amountIn(op), coinOr(op.to).currency);
-    else if (t === 'income') income += toUah(op.amount, coinOr(op.from).currency);
-  }
-  return { expense, income };
+  const all = cached('totals', () => {
+    const out = new Map();
+    const add = (k, field, v) => {
+      let x = out.get(k);
+      if (!x) out.set(k, (x = { expense: 0, income: 0 }));
+      x[field] += v;
+    };
+    for (const op of state.ops) {
+      const t = opType(op);
+      let v;
+      if (t === 'expense') v = toUah(amountIn(op), coinOr(op.to).currency);
+      else if (t === 'income') v = toUah(op.amount, coinOr(op.from).currency);
+      else continue;
+      add(periodOf(op.date), t, v);
+      add(op.date, t, v);
+    }
+    return out;
+  });
+  const x = all.get(key);
+  return { expense: x?.expense ?? 0, income: x?.income ?? 0 };
 }
 
 const totalBalance = () => state.coins.filter(inBalance).reduce((s, a) => s + toUah(balance(a), a.currency), 0);
@@ -230,7 +285,7 @@ function headStats() {
 
 /** Колір монети витрати за поточний місяць — з темпом і кількістю операцій. */
 function coinBudget(c, spent, ym = currentPeriod()) {
-  const count = state.ops.filter((op) => op.to === c.id && inMonth(op, ym)).length;
+  const count = monthMoves(c, ym)?.n ?? 0;
   const elapsed = ym === currentPeriod() ? periodElapsed(ym) : 1;
   return M.budgetState(spent, c.budget, { elapsed, count });
 }
@@ -1108,10 +1163,20 @@ const PLAN_BACKLOG = 10;
  */
 function planned() {
   const today = M.ymd();
+  return cached(`planned:${today}`, () => plannedOn(today));
+}
+
+function plannedOn(today) {
   const out = [];
+  const doneBy = new Map();
+  for (const o of state.ops) {
+    if (o.fromRule == null) continue;
+    if (!doneBy.has(o.fromRule)) doneBy.set(o.fromRule, new Set());
+    doneBy.get(o.fromRule).add(o.ruleDate);
+  }
   for (const rule of state.ops) {
     if (!rule.repeat?.every) continue;
-    const done = new Set(state.ops.filter((o) => o.fromRule === rule.id).map((o) => o.ruleDate));
+    const done = doneBy.get(rule.id) ?? new Set();
     const skip = new Set(rule.repeat.skip ?? []);
     const dates = M.repeatDates(rule.date, rule.repeat.every, rule.repeat.until, today).filter((x) => !done.has(x) && !skip.has(x));
     const due = dates.filter((x) => x <= today).slice(-PLAN_BACKLOG);
@@ -1160,7 +1225,9 @@ function planMenu(p) {
       }, icon('close'), 'Зупинити повтор'))));
 }
 
-const byNewest = (a, b) => b.date.localeCompare(a.date) || (b.created ?? b.updated ?? 0) - (a.created ?? a.updated ?? 0);
+// Дати «РРРР-ММ-ДД» — просте порівняння рядків; localeCompare на тисячах операцій помітно повільніший
+const cmp = (x, y) => (x > y) - (x < y);
+const byNewest = (a, b) => cmp(b.date, a.date) || (b.created ?? b.updated ?? 0) - (a.created ?? a.updated ?? 0);
 
 /**
  * Підсумок дня в стрічці однієї монети — «зміна» в її валюті: витрата — мінус витрачене,
@@ -1236,8 +1303,9 @@ function feedList() {
     const real = ops.filter((op) => !op.plan);
     out.push(h('p', { class: 'feed-found' }, `Знайдено: ${real.length}`, feedType === 'transfer' ? null : h('b', {}, signedUah(opsChange(real)))));
   }
+  const byDay = Map.groupBy(ops, (op) => op.date);
   for (const date of shown) {
-    const dayOps = ops.filter((op) => op.date === date);
+    const dayOps = byDay.get(date);
     let foot;
     if (feedCoin) foot = coinDayFoot(coin(feedCoin), dayOps);
     else if (filtered) {
