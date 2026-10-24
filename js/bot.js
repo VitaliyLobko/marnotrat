@@ -1,9 +1,13 @@
 // Telegram-бот Хобі-плану шле вечірній підсумок дня й неділі — сюди ж і гроші.
 // Боту їдуть лише підсумки днів у гривнях (витрати, доходи, суми за категоріями) і бюджет місяця —
-// без операцій, рахунків і коментарів. Адреса й ключ — з Хобі-плану: на github.io обидва застосунки на одному origin.
+// без операцій, рахунків і коментарів. Адреса й ключ — зі спільного bot-settings.json на Google Диску,
+// а поки його нема — з Хобі-плану на цьому телефоні: на github.io обидва застосунки на одному origin.
 
 const HOBBY = { url: 'hobby-planner:bot-url', key: 'hobby-planner:bot-key' };
-const KEYS = { off: 'marnotrat:bot-off', last: 'marnotrat:bot-last', sig: 'marnotrat:bot-sig', error: 'marnotrat:bot-error' };
+const KEYS = {
+  off: 'marnotrat:bot-off', last: 'marnotrat:bot-last', sig: 'marnotrat:bot-sig', error: 'marnotrat:bot-error',
+  url: 'marnotrat:bot-url', key: 'marnotrat:bot-key', at: 'marnotrat:bot-at',
+};
 // Те саме ще раз не шлемо, але раз на пів години — так: бот бачить, що дані свіжі
 const RESEND_MS = 30 * 60 * 1000;
 
@@ -17,11 +21,34 @@ function set(k, v) {
   } catch { /* приватний режим */ }
 }
 
-/** Бот підключено в Хобі-плані: { url, key } або null. */
+const clean = (url, key) => ({ url: (url ?? '').trim().replace(/\/+$/, ''), key: (key ?? '').trim() });
+
+/** Бот: з Диска (from 'drive') або з Хобі-плану на цьому телефоні (from 'hobby'); null — не підключений. */
 export function botConfig() {
-  const url = (get(HOBBY.url) ?? '').trim().replace(/\/+$/, '');
-  const key = (get(HOBBY.key) ?? '').trim();
-  return url && key ? { url, key } : null;
+  const own = clean(get(KEYS.url), get(KEYS.key));
+  if (own.url && own.key) return { ...own, from: 'drive' };
+  const hobby = clean(get(HOBBY.url), get(HOBBY.key));
+  return hobby.url && hobby.key ? { ...hobby, from: 'hobby' } : null;
+}
+
+/**
+ * Для спільного файлу на Диску: з часом запису з Диска, а з Хобі-плану — з часом 0,
+ * щоб будь-який запис з Диска його переміг. null — бот не підключений.
+ */
+export function sharedConfig() {
+  const cfg = botConfig();
+  if (!cfg) return null;
+  return { url: cfg.url, key: cfg.key, updated: cfg.from === 'drive' ? Number(get(KEYS.at) || 0) : 0 };
+}
+
+/** Новіший запис з Диска. Інша адреса чи ключ — підсумки підуть боту ще раз, не чекаючи пів години. */
+export function setSharedConfig(url, key, at) {
+  const next = clean(url, key);
+  const cur = botConfig();
+  set(KEYS.url, next.url || null);
+  set(KEYS.key, next.key || null);
+  set(KEYS.at, at);
+  if (cur?.url !== next.url || cur?.key !== next.key) set(KEYS.sig, null);
 }
 
 export const botOn = () => get(KEYS.off) !== '1';

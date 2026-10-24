@@ -136,7 +136,8 @@ function botCard() {
       h('p', { class: 'muted small' },
         'Бот Хобі-плану ввечері пише один підсумок дня — справи, вагу й гроші, а в неділю — тиждень. ',
         'Підключи його в ', h('a', { href: '../hobby-planner/' }, 'Хобі-плані'),
-        ' (Налаштування → Telegram-бот) — Марнотрат візьме його сам.'));
+        ' (Налаштування → Telegram-бот) — Марнотрат візьме його сам: на цьому телефоні одразу, ',
+        'на інших — з Google Диска (спільний файл bot-settings.json), коли тут підключено синхронізацію.'));
   }
   const on = Bot.botOn();
   const last = Bot.lastSent();
@@ -2931,6 +2932,11 @@ async function init() {
   // Синхронізація: при відкритті й поверненні в застосунок; ключ Google оновлюємо з першого натискання
   if (Sync.syncOn()) { Sync.preload(); runSync(); }
   Bot.scheduleBot(botPayload, 1500);
+  // Адреса й ключ бота прийшли з Диска (спільний bot-settings.json) — одразу підсумки, у налаштуваннях — новий стан
+  window.addEventListener('bot-config', () => {
+    Bot.scheduleBot(botPayload, 0);
+    if (view === 'settings') render();
+  });
   showWhatsNew();
   document.addEventListener('pointerup', () => { if (Sync.syncOn() && !Sync.tokenValid()) runSync({ gesture: true }); }, true);
   document.addEventListener('visibilitychange', () => {
