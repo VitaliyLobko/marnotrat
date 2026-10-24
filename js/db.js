@@ -56,18 +56,42 @@ export async function loadAll() {
   return state;
 }
 
-/** changes: { store: { put: [obj], del: [id] } } — усе однією транзакцією, з міткою часу updated. */
+/**
+ * changes: { store: { put: [obj], del: [id] } } — усе однією транзакцією, з міткою часу updated.
+ * Мітка — не менша за наявну + 1 (а в надгробка — за мітку видаленого запису): годинник іншого телефона
+ * може бути попереду, а правка тут мусить бути новішою за те, що правили. Спершу читаємо, потім пишемо.
+ */
 export async function write(changes) {
   const now = Date.now();
-  await run(Object.keys(changes), 'readwrite', (tx) => {
-    for (const [name, { put = [], del = [] }] of Object.entries(changes)) {
-      const store = tx.objectStore(name);
+  const names = Object.keys(changes);
+  await run(names, 'readwrite', (tx) => {
+    const jobs = [];
+    for (const [name, { put = [] }] of Object.entries(changes)) {
       for (const obj of put) {
-        obj.updated = now;
-        store.put(obj);
+        const reads = [[name, obj.id]];
+        if (name === 'meta' && obj.id.startsWith('del:') && names.includes(obj.store)) reads.push([obj.store, obj.ref]);
+        jobs.push({ name, obj, reads, olds: [] });
       }
-      for (const id of del) store.delete(id);
     }
+    const flush = () => {
+      for (const { name, obj, olds } of jobs) {
+        obj.updated = Math.max(now, ...olds.map((o) => (Number(o?.updated) || 0) + 1));
+        tx.objectStore(name).put(obj);
+      }
+      for (const [name, { del = [] }] of Object.entries(changes)) for (const id of del) tx.objectStore(name).delete(id);
+    };
+    let pending = 0;
+    for (const job of jobs) {
+      for (const [name, id] of job.reads) {
+        pending += 1;
+        tx.objectStore(name).get(id).onsuccess = (e) => {
+          job.olds.push(e.target.result);
+          pending -= 1;
+          if (!pending) flush();
+        };
+      }
+    }
+    if (!pending) flush();
   });
   return now;
 }

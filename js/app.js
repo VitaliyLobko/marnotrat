@@ -1,9 +1,10 @@
 // Марнотрат: головна з монетами, екран суми, стрічка, звіти, налаштування.
 import { loadAll, write, uid, replaceAll, putFile, getFile, dropFilesExcept } from './db.js';
-import { slAvailable, readJournal, addRecord, patchRecord, removeRecord } from './journal.js';
+import { slAvailable, readJournal, addRecord, patchRecord, removeRecord, unlinkJournal } from './journal.js';
 import * as M from './model.js';
 import * as Sync from './sync.js';
 import * as Bot from './bot.js';
+import { cursors, exchange } from './cloud.js';
 import { demoChanges, demoRemoval, hasDemo } from './demo.js';
 import { CHANGES, changesSince } from './changes.js';
 import { $, h, icon, hasIcon, toast, sheet, closeSheet, chips, swipeStep, vibrate } from './ui.js';
@@ -88,6 +89,7 @@ async function save(changes, { redraw = true } = {}) {
   }
   if (redraw) render();
   scheduleSync();
+  scheduleCloud();
   Bot.scheduleBot(botPayload);
 }
 
@@ -146,8 +148,15 @@ function botCard() {
     try { await Bot.pushBot(botPayload, { force: true }); toast('Надіслано боту'); } catch (err) { toast(Bot.lastError() || err.message); }
     render();
   };
+  const synced = cloudCur.last();
+  const syncedWhen = synced ? new Date(synced).toLocaleString('uk-UA', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }) : '';
   return h('section', { class: 'card set-card' },
-    h('h2', {}, 'Підсумки в Telegram'),
+    h('h2', {}, 'Бот: дані й підсумки'),
+    h('p', { class: 'muted small' },
+      'Монети й операції зберігаються в базі бота — так вони однакові на всіх телефонах. Без інтернету все записується як завжди й поїде, щойно з’явиться зв’язок. ',
+      cloud.error ? `Помилка: ${cloud.error}.` : synced ? `Обмін ${syncedWhen}.` : 'Обміну ще не було.'),
+    h('button', { type: 'button', class: 'btn', onClick: () => runCloud({ loud: true }) }, icon('refresh'), 'Обмінятися зараз'),
+    h('h3', {}, 'Підсумки в Telegram'),
     chips([['on', 'Увімкнено'], ['off', 'Вимкнено']], on ? 'on' : 'off', (v) => {
       Bot.setBotOn(v === 'on');
       if (v === 'on') Bot.scheduleBot(botPayload, 0);
@@ -172,9 +181,13 @@ function scheduleSync() {
   sync.timer = setTimeout(() => runSync(), 2000);
 }
 
+// Підключено бота — дані між телефонами возить його база, а Диск раз на день зберігає копію
+const BACKUP_EVERY = 24 * 60 * 60 * 1000;
+
 /** Один прохід синхронізації. gesture — викликано з натискання: можна оновити ключ Google. */
 async function runSync({ gesture = false, loud = false } = {}) {
   if (!Sync.syncOn() || !navigator.onLine) return;
+  if (!loud && Bot.botConfig() && Date.now() - (Sync.lastSync() ?? 0) < BACKUP_EVERY) return;
   if (sync.busy) { sync.again = true; return; }
   sync.busy = true;
   try {
@@ -200,6 +213,57 @@ async function runSync({ gesture = false, loud = false } = {}) {
   } finally {
     sync.busy = false;
     if (sync.again) { sync.again = false; scheduleSync(); }
+  }
+}
+
+// ---------- дані через базу бота (Cloudflare D1) ----------
+
+// Монети, операції й meta (з надгробками del:*) їздять між телефонами через базу бота Хобі-плану тим самим
+// ключем, що й підсумки. Злиття те саме, що з Диском (Sync.merge): перемагає новіший запис, надгробок — старіший.
+const CLOUD = 'marnotrat';
+const cloudCur = cursors(CLOUD);
+const cloud = { timer: 0, busy: false, again: false, error: '' };
+
+function scheduleCloud(ms = 2000) {
+  if (!Bot.botConfig()) return;
+  clearTimeout(cloud.timer);
+  cloud.timer = setTimeout(() => runCloud(), ms);
+}
+
+/** Один обмін з базою бота. Без мережі — тихо: змінене поїде наступного разу (позначки не зсуваються). */
+async function runCloud({ loud = false } = {}) {
+  const cfg = Bot.botConfig();
+  if (!cfg) return;
+  if (cloud.busy) { cloud.again = true; return; }
+  cloud.busy = true;
+  try {
+    // Свого на цьому телефоні ще нічого — спершу взяти з бота, без стартових монет (інакше «Готівка» задвоїлась би)
+    const fresh = !cloudCur.last() && !state.ops.some((o) => !o.demo);
+    const records = Sync.STORES.flatMap((store) => state[store].map((r) => ({ store, id: r.id, data: r, updated: r.updated ?? 0 })));
+    const { rows, commit } = await exchange({ url: cfg.url, key: cfg.key, app: CLOUD, prefix: CLOUD, records, skipPush: fresh });
+    const remote = Object.fromEntries(Sync.STORES.map((name) => [name, []]));
+    for (const r of rows) if (!r.deleted && r.data?.id === r.id && remote[r.store]) remote[r.store].push(r.data);
+    const took = fresh && rows.length > 0 && !state.ops.some((o) => !o.demo);
+    // Поки ходили до бота, тут могли щось змінити — зливаємо зі свіжим станом
+    const merged = took ? Sync.merge({}, remote) : Sync.merge(snapshot(), remote);
+    if (Sync.stamp(merged) !== Sync.stamp(snapshot())) {
+      await replaceAll(merged);
+      Object.assign(state, merged);
+      render();
+    }
+    // Новий телефон, а в боті порожньо — стартові монети лишаються й поїдуть наступним обміном
+    commit(!fresh || took);
+    if (fresh && !took) cloud.again = true;
+    cloud.error = '';
+    if (loud) toast('Обмін з ботом пройшов');
+  } catch (err) {
+    cloud.error = err.message === 'key' ? 'Ключ бота не підходить — онови його в Хобі-плані'
+      : err instanceof TypeError ? 'Немає зв’язку з ботом' : err.message;
+    if (loud) toast(cloud.error);
+  } finally {
+    cloud.busy = false;
+    if (cloud.again) { cloud.again = false; scheduleCloud(500); }
+    if (view === 'settings' && !document.activeElement?.matches('input')) render();
   }
 }
 
@@ -1179,7 +1243,15 @@ function opRow(op) {
 async function deleteOp(op) {
   if (refuse([], [op.id])) return;
   await save({ ops: { del: [op.id] } });
-  toast('Операцію видалено', { label: 'Скасувати', run: () => save({ ops: { put: [{ ...op }] } }) });
+  // Що операція записала в Стрілецький журнал (патрони, тюнінг, екіпірування) — теж прибрати
+  const relink = await unlinkJournal(op.sl).catch(() => null);
+  toast(relink ? `Операцію видалено — і з журналу (${op.sl.text})` : 'Операцію видалено', {
+    label: 'Скасувати',
+    run: async () => {
+      await save({ ops: { put: [{ ...op }] } });
+      if (relink) await relink().catch(() => toast('У журнал не повернулось — додай там вручну'));
+    },
+  });
 }
 
 /**
@@ -1928,6 +2000,7 @@ function hiddenCard() {
           type: 'button', class: 'btn danger', onClick: async () => {
             closeSheet();
             await save({ coins: { del: [c.id] }, ops: { del: ops.map((o) => o.id) } }, { redraw: false });
+            for (const o of ops) await unlinkJournal(o.sl).catch(() => null);
             toast(`«${c.name}» видалено`);
             render();
           },
@@ -2084,6 +2157,7 @@ function syncCard() {
     h('p', { class: 'muted small' }, on
       ? (sync.error ? `Помилка: ${sync.error}` : last ? `Синхронізовано ${when}` : 'Ще не синхронізовано')
       : 'Дані спільні для всіх твоїх телефонів: файл marnotrat-sync.json на твоєму Диску. Застосунок бачить лише свої файли.'),
+    on && Bot.botConfig() ? h('p', { class: 'muted small' }, 'Підключено бота: дані між телефонами передає він, а сюди раз на день зберігається резервна копія.') : null,
     on
       ? h('div', { class: 'btn-grid' },
         h('button', { type: 'button', class: 'btn primary', onClick: () => runSync({ loud: true }) }, icon('refresh'), 'Синхронізувати'),
@@ -2148,6 +2222,8 @@ async function importBackup(f) {
           closeSheet();
           await replaceAll(data);
           Object.assign(state, await loadAll());
+          cloudCur.reset();
+          scheduleCloud(0);
           toast('Відновлено');
           render();
         },
@@ -2931,17 +3007,20 @@ async function init() {
   window.addEventListener('hashchange', route);
   // Синхронізація: при відкритті й поверненні в застосунок; ключ Google оновлюємо з першого натискання
   if (Sync.syncOn()) { Sync.preload(); runSync(); }
+  runCloud();
   Bot.scheduleBot(botPayload, 1500);
   // Адреса й ключ бота прийшли з Диска (спільний bot-settings.json) — одразу підсумки, у налаштуваннях — новий стан
   window.addEventListener('bot-config', () => {
+    scheduleCloud(0);
     Bot.scheduleBot(botPayload, 0);
     if (view === 'settings') render();
   });
   showWhatsNew();
   document.addEventListener('pointerup', () => { if (Sync.syncOn() && !Sync.tokenValid()) runSync({ gesture: true }); }, true);
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') { runSync(); Bot.scheduleBot(botPayload, 1500); }
+    if (document.visibilityState === 'visible') { runSync(); scheduleCloud(300); Bot.scheduleBot(botPayload, 1500); }
   });
+  addEventListener('online', () => scheduleCloud(500));
   addEventListener('resize', () => { if (onMain()) fitNames(); });
   // Тінь під закріпленим рядом рахунків — лише коли під ним уже гортаються витрати
   addEventListener('scroll', () => {
