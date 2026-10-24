@@ -1858,13 +1858,10 @@ function viewSettings() {
   const rateStatus = h('p', { class: 'muted small' }, m.manual ? 'Свій курс — НБУ не підтягується' : m.date ? `Курс НБУ на ${M.dateTitle(m.date)}` : 'Курс за замовчуванням — підтягну НБУ, щойно буде зв’язок');
   const file = h('input', { type: 'file', accept: 'application/json,.json', hidden: true, onChange: (e) => importBackup(e.target.files[0]) });
   const theme = chips(THEMES, recall('theme') || 'auto', (v) => { remember('theme', v); applyTheme(); });
-  return h('div', { class: 'page stack' },
-    aboutPanel(),
-    // Версія й «Перевірити оновлення» — одразу під «Про застосунок», а не в самому низу
-    aboutCard(),
-    h('section', { class: 'card set-card' }, h('h2', {}, 'Тема'), theme),
-    periodCard(),
-    h('section', { class: 'card set-card' },
+  return h('div', { class: 'page' },
+    settingsGroup('Про застосунок', [aboutPanel(), aboutCard()]),
+    settingsGroup('Облік', [periodCard(),
+      h('section', { class: 'card set-card' },
       h('h2', {}, 'Курси до гривні'),
       h('div', { class: 'rate-row' }, h('b', {}, '$'), rateInput('USD')),
       h('div', { class: 'rate-row' }, h('b', {}, '€'), rateInput('EUR')),
@@ -1873,11 +1870,10 @@ function viewSettings() {
         type: 'button', class: 'btn', onClick: async () => {
           try { await fetchRates(true); toast('Курс НБУ оновлено'); render(); } catch (err) { toast(err instanceof TypeError ? 'Немає зв’язку з НБУ' : err.message); }
         },
-      }, icon('refresh'), 'Курс НБУ на сьогодні')),
-    syncCard(),
-    botCard(),
-    demoCard(),
-    h('section', { class: 'card set-card' },
+      }, icon('refresh'), 'Курс НБУ на сьогодні'))]),
+    settingsGroup('Вигляд', [h('section', { class: 'card set-card' }, h('h2', {}, 'Тема'), theme)]),
+    settingsGroup('Дані', [syncCard(), botCard(),
+      h('section', { class: 'card set-card' },
       h('h2', {}, 'Резервна копія'),
       h('p', { class: 'muted small' }, Sync.syncOn()
         ? 'Файл JSON з усіма даними — про всяк випадок, окремо від Google Диска.'
@@ -1886,13 +1882,18 @@ function viewSettings() {
         h('button', { type: 'button', class: 'btn', onClick: exportBackup }, icon('archive'), 'Зберегти копію'),
         h('button', { type: 'button', class: 'btn', onClick: () => file.click() }, icon('undo'), 'Відновити')),
       file),
-    hiddenCard(),
-    h('section', { class: 'card set-card' },
+      hiddenCard(), demoCard()]),
+    settingsGroup('Небезпечна зона', [h('section', { class: 'card set-card' },
       h('h2', {}, 'Почати з чистого'),
       h('p', { class: 'muted small' }, Sync.syncOn()
         ? 'Стерти всі монети й операції — тут, на Google Диску й на інших твоїх телефонах. Лишаться стартові монети.'
         : 'Стерти всі монети й операції на цьому телефоні. Лишаться стартові монети.'),
-      h('button', { type: 'button', class: 'btn danger', onClick: wipeAll }, icon('close'), 'Стерти всі дані')));
+      h('button', { type: 'button', class: 'btn danger', onClick: wipeAll }, icon('close'), 'Стерти всі дані'))], { danger: true }));
+}
+
+/** Група налаштувань, як у Стрілецькому журналі: рамка з назвою на лінії, розділи всередині — через лінію. */
+function settingsGroup(title, sections, { danger = false } = {}) {
+  return h('fieldset', { class: `settings-group${danger ? ' danger' : ''}` }, h('legend', {}, title), sections.filter(Boolean));
 }
 
 /** Сховані монети: повернути (сховав помилково) чи видалити разом з операціями. Нема схованих — картки нема. */

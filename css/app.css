@@ -434,6 +434,15 @@ a { color: var(--brand); }
 .update button { border: 0; border-radius: 10px; padding: 8px 14px; background: rgb(0 0 0 / .18); color: inherit; font-weight: 700; }
 .set-card { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
 .set-card h2 { margin: 0; font-size: 17px; }
+/* налаштування групами, як у Стрілецькому журналі: рамка з назвою на лінії, всередині — розділи через лінію */
+.settings-group { min-width: 0; margin: 22px 0 14px; padding: 2px 16px 4px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: 0 1px 3px rgb(0 0 0 / .08); }
+.settings-group > legend { padding: 0 8px; margin-left: -6px; border-radius: 6px; background: var(--surface); color: var(--brand); font-size: 13px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.settings-group > .set-card { padding: 14px 0; border-radius: 0; background: none; box-shadow: none; overflow: visible; }
+/* лінія між розділами — від кольору тексту: у темній темі var(--line) майже зливався з тлом */
+.settings-group > .set-card + .set-card { border-top: 1px solid color-mix(in srgb, var(--text) 20%, transparent); }
+.settings-group > .set-card h2 { font-size: 15px; }
+.settings-group.danger { border-color: color-mix(in srgb, var(--over) 45%, var(--line)); }
+.settings-group.danger > legend { color: var(--over); }
 .rate-row { display: grid; grid-template-columns: 60px 1fr; align-items: center; gap: 10px; }
 .error { padding: 24px 16px; color: var(--over-ink); }
 /* на екрані суми тост — над кнопками дат */
