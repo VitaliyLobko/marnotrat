@@ -11,6 +11,15 @@ export async function slAvailable() {
   }
 }
 
+/** Відкритий журнал (інша вкладка) — нехай перечитає базу й синхронізується: сам він про наш запис не знає. */
+function notify() {
+  try {
+    const ch = new BroadcastChannel(SL);
+    ch.postMessage({ type: 'external-change' });
+    ch.close();
+  } catch { /* старий браузер — журнал побачить запис при наступному відкритті */ }
+}
+
 /** Відкрити чужу базу без версії й закрити одразу після запиту — щоб не заважати її оновленню. */
 function withSL(stores, mode, fn) {
   return new Promise((resolve, reject) => {
@@ -24,7 +33,11 @@ function withSL(stores, mode, fn) {
       const tx = db.transaction(stores, mode);
       let out;
       fn(tx, (v) => { out = v; });
-      tx.oncomplete = () => { db.close(); resolve(out); };
+      tx.oncomplete = () => {
+        db.close();
+        if (mode === 'readwrite') notify();
+        resolve(out);
+      };
       tx.onerror = () => { db.close(); reject(tx.error); };
       tx.onabort = () => { db.close(); reject(tx.error ?? new Error('Запис скасовано')); };
     };
@@ -72,10 +85,48 @@ export function patchRecord(store, id, fn) {
   });
 }
 
-/** Видалити запис — з надгробком, як видаляє сам журнал, інакше синхронізація повернула б його. */
+/** Видалити запис — з надгробком, як видаляє сам журнал, інакше синхронізація повернула б його. Повертає видалений запис. */
 export function removeRecord(store, id) {
-  return withSL([store, 'tombstones'], 'readwrite', (tx) => {
-    tx.objectStore('tombstones').put({ id, store, updated: Date.now() });
-    tx.objectStore(store).delete(id);
+  return withSL([store, 'tombstones'], 'readwrite', (tx, done) => {
+    const os = tx.objectStore(store);
+    os.get(id).onsuccess = (e) => {
+      const old = e.target.result;
+      tx.objectStore('tombstones').put({ id, store, updated: stamp(old) });
+      os.delete(id);
+      done(old ?? null);
+    };
   });
+}
+
+/** Повернути видалений запис («Скасувати»): новіший за надгробок, щоб синхронізація його не прибрала. */
+function restoreRecord(store, rec) {
+  return withSL([store, 'tombstones'], 'readwrite', (tx) => {
+    const tombs = tx.objectStore('tombstones');
+    tombs.get(rec.id).onsuccess = (e) => {
+      tx.objectStore(store).put({ ...rec, updated: stamp(e.target.result ?? rec) });
+      tombs.delete(rec.id);
+    };
+  });
+}
+
+/**
+ * Операцію видалили в Марнотраті — прибрати й те, що вона записала в журнал (sl з операції).
+ * Повертає «Скасувати» (повернути як було) або null, якщо в журналі нічого не було.
+ */
+export async function unlinkJournal(sl) {
+  if (!sl?.id || sl.skip || !(await slAvailable())) return null;
+  if (sl.kind === 'ammo' || sl.kind === 'gear') {
+    const store = sl.kind === 'ammo' ? 'movements' : 'gear';
+    const old = await removeRecord(store, sl.id);
+    return old ? () => restoreRecord(store, old) : null;
+  }
+  if (sl.kind === 'mod' && sl.gun) {
+    let mod = null;
+    await patchRecord('weapons', sl.gun, (w) => {
+      mod = (w.mods ?? []).find((m) => m.id === sl.id) ?? null;
+      return { ...w, mods: (w.mods ?? []).filter((m) => m.id !== sl.id) };
+    });
+    return mod ? () => patchRecord('weapons', sl.gun, (w) => ({ ...w, mods: [...(w.mods ?? []), mod] })) : null;
+  }
+  return null;
 }

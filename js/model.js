@@ -79,18 +79,21 @@ const SIGN = { UAH: 'грн', USD: '$', EUR: '€' };
 
 export const round2 = (v) => Math.round(v * 100) / 100;
 
+// Форматери створюються раз: new Intl.NumberFormat на кожну суму гальмував довгі списки
+const WHOLE = new Intl.NumberFormat('uk-UA', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+const CENTS = new Intl.NumberFormat('uk-UA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const NUM = new Intl.NumberFormat('uk-UA', { maximumFractionDigits: 2 });
+
 /** «5 494 грн», «$ 120», «€ 12,50»: копійки — лише коли вони є. */
 export function money(v, cur = 'UAH', { sign = '' } = {}) {
   const n = round2(Math.abs(v));
-  const s = new Intl.NumberFormat('uk-UA', {
-    minimumFractionDigits: Number.isInteger(n) ? 0 : 2, maximumFractionDigits: 2,
-  }).format(n);
+  const s = (Number.isInteger(n) ? WHOLE : CENTS).format(n);
   const body = cur === 'UAH' ? `${s} грн` : `${SIGN[cur] ?? cur} ${s}`;
   return `${sign}${body}`;
 }
 
 /** Число без валюти: «9 000» */
-export const num = (v) => new Intl.NumberFormat('uk-UA', { maximumFractionDigits: 2 }).format(round2(v));
+export const num = (v) => NUM.format(round2(v));
 
 // ---------- калькулятор ----------
 
