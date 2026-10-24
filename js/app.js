@@ -439,9 +439,9 @@ function viewMain() {
   // Цілі стоять у сітці витрат, як копилка
   const grid = state.coins.filter((c) => (c.kind === 'expense' || c.kind === 'goal') && !c.archived).sort((a, b) => a.order - b.order);
   return h('div', { class: `main${editing() ? ' editing' : ''}` },
-    incomeOpen ? pager('income', [...coinsOf('income').map((c) => coinEl(c, ym)), addCoinEl('income')], 5, 'coin-row incomes') : null,
+    incomeOpen ? pager('income', [...coinsOf('income').map((c) => coinEl(c, ym)), addCoinEl('income')], 4, 'coin-row incomes') : null,
     pager('account', [...state.coins.filter((c) => (c.kind === 'account' || c.kind === 'debt') && !c.archived)
-      .sort((a, b) => a.order - b.order).map((c) => coinEl(c, ym)), addCoinEl('account')], 5, 'coin-row accounts'),
+      .sort((a, b) => a.order - b.order).map((c) => coinEl(c, ym)), addCoinEl('account')], 4, 'coin-row accounts'),
     pager('expense', [...grid.map((c) => coinEl(c, ym)), addCoinEl('expense')], 16, 'expenses'),
     state.ops.length ? null : h('p', { class: 'muted small main-hint' },
       'Тягни монету пальцем: дохід — на рахунок, рахунок — на витрату чи інший рахунок. Тап — історія монети, довге натискання — змінити.'));
@@ -1352,7 +1352,7 @@ function viewFeed() {
   return h('div', { class: 'page stack feed-page' }, feedCoin ? budgetCard(coin(feedCoin)) : null, h('div', { class: 'feed-tools' }, search, types), list);
 }
 
-/** Ліміт монети смужкою: на головній під монетою його більше не пишемо — тут цифри повністю. */
+/** Ліміт монети смужкою в її стрічці (під монетою на головній цифри немає); колір — за темпом, як у монети. */
 function budgetCard(c) {
   if (!c?.budget || (c.kind !== 'expense' && c.kind !== 'goal')) return null;
   const goal = c.kind === 'goal';

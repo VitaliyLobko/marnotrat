@@ -144,12 +144,7 @@ a { color: var(--brand); }
   display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px 6px; align-content: start;
   padding: 8px 6px 12px;
 }
-.coin-row { --coin: min(52px, 13.5vw); background: var(--surface); border-bottom: 1px solid var(--line); }
-.coin-row .coin-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 2px 4px; padding: 6px 4px 8px; }
-.coin-row .coin { gap: 3px; padding: 2px 0; }
-.coin-row .coin-name { font-size: clamp(10px, 2.9vw, 12px); }
-.coin-row .coin-sum { font-size: 12px; }
-.coin-row .coin-sub { max-width: 100%; overflow: hidden; text-overflow: ellipsis; font-size: 10px; }
+.coin-row { background: var(--surface); border-bottom: 1px solid var(--line); }
 /* сторінки ряду: гортання вбік із прилипанням до сторінки, крапки внизу */
 .pager-track {
   display: flex; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none;
@@ -695,7 +690,7 @@ details.icon-group > .icon-row { padding-bottom: 10px; }
 .icon-pick-now svg { width: 22px; height: 22px; }
 .icon-pick-all > .icon-picker { padding: 0 10px 10px; }
 
-/* ліміт монети в її стрічці: на головній під монетою цифри більше немає */
+/* ліміт монети в її стрічці */
 .budget-card { padding: 12px 14px; display: grid; gap: 8px; }
 .budget-nums { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 14px; color: var(--text-2); font-variant-numeric: tabular-nums; }
 .budget-nums b { color: var(--text); font-weight: 600; }
