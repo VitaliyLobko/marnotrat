@@ -342,12 +342,10 @@ function coinEl(c, ym) {
     // Ціль: відкладено / скільки треба; кільце — частка зібраного
     sum = balance(c);
     fill = c.budget ? Math.min(1, Math.max(0, sum / c.budget)) : 0;
-    if (c.budget) sub = M.num(c.budget);
     if (c.budget && sum >= c.budget) st = 'done';
   } else {
     sum = monthSpent(c, ym);
     ({ st, fill } = coinBudget(c, sum, ym));
-    if (c.budget) sub = M.num(c.budget);
   }
   const face = h('div', { class: 'coin-face', style: { '--fill': String(fill) } },
     c.kind === 'expense' ? h('span', { class: 'coin-fill' }) : null,
@@ -412,26 +410,27 @@ function pager(key, items, perPage, cls) {
   return h('div', { class: `pager ${cls}` }, track, dots);
 }
 
-/** Рядок на головній: заплановані повтори, яким уже пора, — тап веде в стрічку. */
-function planHint() {
-  if (editing()) return null;
+/**
+ * Що чекає уваги: повтори, яким пора, прострочені борги, гарантії, що спливають.
+ * На головній — лише лічильник на кнопці меню (місце — монетам), самі рядки — групою в меню.
+ */
+function alerts() {
   const n = dueCount();
   // Борги, яким настав строк і які ще не закриті
   const late = coinsOf('debt').filter((c) => c.due && c.due <= M.ymd() && Math.abs(balance(c)) >= 0.01);
   const rows = late.map((c) => {
     const bal = balance(c);
-    return h('button', { type: 'button', class: 'plan-hint debt', onClick: () => openFeed(c.id) }, icon('handshake'),
-      `${c.name}: ${bal > 0 ? 'час повернути тобі' : 'час віддати'} ${M.money(Math.abs(bal), c.currency)}`, icon('next'));
+    return { cls: 'debt', ico: 'handshake', to: `feed/${c.id}`, text: `${c.name}: ${bal > 0 ? 'час повернути тобі' : 'час віддати'} ${M.money(Math.abs(bal), c.currency)}` };
   });
-  if (n) rows.unshift(h('button', { type: 'button', class: 'plan-hint', onClick: () => go('feed') }, icon('refresh'), `До проведення: ${n}`, icon('next')));
+  if (n) rows.unshift({ cls: '', ico: 'refresh', to: 'feed', text: `До проведення: ${n}` });
   // Гарантія спливає за місяць — ще є час звернутись
   const ending = warrantyOps().filter((op) => daysLeft(op.warranty) >= 0 && daysLeft(op.warranty) <= WARRANTY_SOON);
   if (ending.length) {
     const first = ending[0];
-    rows.push(h('button', { type: 'button', class: 'plan-hint warranty', onClick: () => go('warranty') }, icon('shield'),
-      ending.length === 1 ? `Гарантія: ${opName(first)} — до ${dmy(first.warranty)}` : `Гарантія спливає: ${ending.length} покупки за місяць`, icon('next')));
+    rows.push({ cls: 'warranty', ico: 'shield', to: 'warranty',
+      text: ending.length === 1 ? `Гарантія: ${opName(first)} — до ${dmy(first.warranty)}` : `Гарантія спливає: ${ending.length} покупки за місяць` });
   }
-  return rows.length ? rows : null;
+  return rows;
 }
 
 function viewMain() {
@@ -440,10 +439,9 @@ function viewMain() {
   // Цілі стоять у сітці витрат, як копилка
   const grid = state.coins.filter((c) => (c.kind === 'expense' || c.kind === 'goal') && !c.archived).sort((a, b) => a.order - b.order);
   return h('div', { class: `main${editing() ? ' editing' : ''}` },
-    incomeOpen ? pager('income', [...coinsOf('income').map((c) => coinEl(c, ym)), addCoinEl('income')], 4, 'coin-row incomes') : null,
+    incomeOpen ? pager('income', [...coinsOf('income').map((c) => coinEl(c, ym)), addCoinEl('income')], 5, 'coin-row incomes') : null,
     pager('account', [...state.coins.filter((c) => (c.kind === 'account' || c.kind === 'debt') && !c.archived)
-      .sort((a, b) => a.order - b.order).map((c) => coinEl(c, ym)), addCoinEl('account')], 4, 'coin-row accounts'),
-    planHint(),
+      .sort((a, b) => a.order - b.order).map((c) => coinEl(c, ym)), addCoinEl('account')], 5, 'coin-row accounts'),
     pager('expense', [...grid.map((c) => coinEl(c, ym)), addCoinEl('expense')], 16, 'expenses'),
     state.ops.length ? null : h('p', { class: 'muted small main-hint' },
       'Тягни монету пальцем: дохід — на рахунок, рахунок — на витрату чи інший рахунок. Тап — історія монети, довге натискання — змінити.'));
@@ -663,7 +661,14 @@ function bindCoin(el, face, c) {
         return at.y >= r.top && at.y <= r.bottom;
       });
       const r = track?.getBoundingClientRect();
-      const dir = !r ? 0 : at.x < r.left + PAGE_EDGE ? -1 : at.x > r.right - PAGE_EDGE ? 1 : 0;
+      let dir = !r ? 0 : at.x < r.left + PAGE_EDGE ? -1 : at.x > r.right - PAGE_EDGE ? 1 : 0;
+      // Гортати є куди — край ряду світиться стрілкою: «тримай тут, перегорну»
+      if (dir < 0 && track.scrollLeft < 1) dir = 0;
+      if (dir > 0 && track.scrollLeft + track.clientWidth >= track.scrollWidth - 1) dir = 0;
+      for (const p of document.querySelectorAll('.pager')) {
+        p.classList.toggle('edge-l', dir < 0 && p === track.parentElement);
+        p.classList.toggle('edge-r', dir > 0 && p === track.parentElement);
+      }
       const now = performance.now();
       if (!dir) drag.edgeAt = 0;
       else if (!drag.edgeAt) drag.edgeAt = now;
@@ -685,6 +690,11 @@ function bindCoin(el, face, c) {
       const ok = editing() ? (dst) => canReorder(c, dst) : (dst) => canDrop(c, dst);
       for (const t of document.querySelectorAll('.coin[data-id]')) {
         if (ok(coin(t.dataset.id))) t.classList.add('drop-ok');
+      }
+      // Крапка сторінки, де є куди кинути, — підсвічена: видно, що ціль далі, за краєм
+      for (const track of document.querySelectorAll('.pager-track')) {
+        const dots = track.nextElementSibling?.children ?? [];
+        [...track.children].forEach((page, i) => dots[i]?.classList.toggle('target', Boolean(page.querySelector('.drop-ok'))));
       }
       drag = { ghost, over: null, raf: 0 };
       vibrate();
@@ -736,6 +746,8 @@ function bindCoin(el, face, c) {
       document.body.classList.remove('dragging');
       el.classList.remove('drag-src');
       for (const t of document.querySelectorAll('.drop-ok, .drop-over')) t.classList.remove('drop-ok', 'drop-over');
+      for (const t of document.querySelectorAll('.pager-dots .target')) t.classList.remove('target');
+      for (const p of document.querySelectorAll('.pager.edge-l, .pager.edge-r')) p.classList.remove('edge-l', 'edge-r');
       drag = null;
     }
     addEventListener('pointermove', onMove, { passive: false });
@@ -1337,7 +1349,22 @@ function viewFeed() {
     onInput: (e) => { feedQuery = e.target.value; clearTimeout(timer); timer = setTimeout(() => list.replaceChildren(...feedList()), 150); },
   });
   const types = feedCoin ? null : chips(FEED_TYPES, feedType, (v) => { feedType = v; list.replaceChildren(...feedList()); });
-  return h('div', { class: 'page stack feed-page' }, h('div', { class: 'feed-tools' }, search, types), list);
+  return h('div', { class: 'page stack feed-page' }, feedCoin ? budgetCard(coin(feedCoin)) : null, h('div', { class: 'feed-tools' }, search, types), list);
+}
+
+/** Ліміт монети смужкою: на головній під монетою його більше не пишемо — тут цифри повністю. */
+function budgetCard(c) {
+  if (!c?.budget || (c.kind !== 'expense' && c.kind !== 'goal')) return null;
+  const goal = c.kind === 'goal';
+  const done = goal ? balance(c) : monthSpent(c, currentPeriod());
+  const st = goal ? (done >= c.budget ? 'done' : '') : coinBudget(c, done).st;
+  const left = c.budget - done;
+  const m = (v) => M.money(v, c.currency);
+  return h('div', { class: `card budget-card${st ? ` st-${st}` : ''}` },
+    h('div', { class: 'budget-nums' },
+      h('span', {}, goal ? 'Зібрано ' : 'Витрачено ', h('b', {}, m(done)), ` з ${m(c.budget)}`),
+      h('b', { class: left < 0 ? 'minus' : '' }, left < 0 ? `понад ${m(-left)}` : goal ? `ще ${m(left)}` : `лишилось ${m(left)}`)),
+    h('div', { class: 'budget-bar' }, h('span', { style: { width: `${Math.min(100, Math.max(0, (done / c.budget) * 100))}%` } })));
 }
 
 // ---------- звіти ----------
@@ -2664,10 +2691,14 @@ function openMenu() {
     return h('button', { type: 'button', class: `menu-item${here === key ? ' on' : ''}`, onClick: () => pick(key) },
       icon(ico), h('span', { class: 'menu-label' }, label), b ? h('span', { class: `menu-badge ${b[1]}` }, String(b[0])) : null);
   };
+  // Нагадування — як пункти меню: тап веде туди, де з ним розібратись
+  const remind = alerts().map((a) => h('button', { type: 'button', class: `plan-hint ${a.cls}`, onClick: () => pick(a.to) },
+    icon(a.ico), h('span', { class: 'menu-label' }, a.text), icon('next')));
   const close = sheet('Меню', h('nav', { class: 'menu' },
     h('div', { class: 'menu-head' },
       h('img', { class: 'menu-logo', src: './icons/icon-192.png', alt: '', width: 44, height: 44 }),
       h('span', {}, h('b', {}, 'Марнотрат'), h('span', {}, `на рахунках ${M.money(Math.round(totalBalance()))}`))),
+    remind.length ? h('div', { class: 'menu-group remind' }, h('p', { class: 'menu-cap' }, 'Нагадування'), remind) : null,
     MENU.map(([title, items]) => h('div', { class: 'menu-group' }, h('p', { class: 'menu-cap' }, title), items.map(item))),
     h('div', { class: 'menu-foot' }, item(['settings', 'gear', 'Налаштування']), h('p', { class: 'menu-ver' }, `версія ${self.APP_VERSION}`))),
   { cls: 'drawer', bare: true });
@@ -2699,13 +2730,19 @@ const VIEWS = {
   reconcile: { title: 'Звірка залишків', render: viewReconcile },
 };
 
+function menuButton() {
+  const n = editing() ? 0 : alerts().length;
+  return h('button', { type: 'button', class: 'icon-btn', 'aria-label': n ? `Меню, нагадувань: ${n}` : 'Меню', onClick: openMenu },
+    icon('menu'), n ? h('span', { class: 'menu-count' }, String(n)) : null);
+}
+
 function topbar() {
   const bar = $('topbar');
   if (view === 'main') {
     const open = recall('income-open') === '1';
     bar.className = 'topbar';
     bar.replaceChildren(
-      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Меню', onClick: openMenu }, icon('menu')),
+      menuButton(),
       headStats(),
       h('button', {
         type: 'button', class: `icon-btn${open ? ' chev-up' : ''}`, 'aria-label': open ? 'Сховати доходи' : 'Показати доходи', 'aria-expanded': String(open),
