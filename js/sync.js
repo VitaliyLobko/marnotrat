@@ -2,14 +2,15 @@
 // Злиття по записах: перемагає новіший (поле updated); видалення — надгробки в meta, щоб запис не воскрес з іншого телефона.
 // Вхід — Google Identity Services, OAuth-клієнт той самий, що в shooting-log і hobby-planner (origin спільний).
 // Ключ Диска діє годину й у фоні не продовжується — оновлюємо його з натискання, яке людина й так робить.
+import * as Bot from './bot.js';
+import { sharedToken, shareToken, dropSharedToken, noteEmail, whoIs } from './google-token.js';
+import { locate, readJson, writeJson, syncBotFile } from './drive-files.js';
 
 const CLIENT_ID = '252063766250-9hhqp9hdefccgp508bv983usv5h17lsf.apps.googleusercontent.com';
 const SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const FILE_NAME = 'marnotrat-sync.json';
-const DRIVE = 'https://www.googleapis.com/drive/v3';
-const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
 const KEY = 'marnotrat:drive';
-const STORES = ['coins', 'ops', 'meta'];
+export const STORES = ['coins', 'ops', 'meta'];
 // Надгробки старші — прибираємо: за пів року всі телефони вже синхронізувались
 const TOMB_TTL = 180 * 24 * 60 * 60 * 1000;
 // Спроба тихо оновити ключ не частіше — інакше вікно Google мелькало б на кожне натискання
@@ -33,7 +34,16 @@ function store() {
 
 export const syncOn = () => Boolean(conf.enabled);
 export const lastSync = () => conf.last ?? null;
-export const tokenValid = () => Boolean(conf.token) && conf.expires > Date.now() + 60_000;
+/** Свій ключ живий — його; ні — спільний з іншого застосунку автора (вхід там годиться й тут). */
+export function tokenValid() {
+  if (conf.token && conf.expires > Date.now() + 60_000) return true;
+  const s = sharedToken(conf);
+  if (!s) return false;
+  conf.token = s.token;
+  conf.expires = s.expires;
+  store();
+  return true;
+}
 
 // ---------- злиття ----------
 
@@ -52,7 +62,8 @@ export function tombsFor(changes) {
 
 /**
  * Злиття двох знімків {coins, ops, meta}: по кожному id — запис з більшим updated;
- * запис, видалений пізніше за свою останню зміну, прибирається. Чиста функція.
+ * запис, видалений пізніше за свою останню зміну, прибирається; надгробок, старіший за сам запис
+ * (запис повернули) чи за 180 днів, — теж: він уже нічого не вирішує. Чиста функція.
  */
 export function merge(local, remote, now = Date.now()) {
   const out = {};
@@ -67,7 +78,9 @@ export function merge(local, remote, now = Date.now()) {
   for (const t of [...out.meta.values()].filter(isTomb)) {
     if (now - (t.updated ?? 0) > TOMB_TTL) { out.meta.delete(t.id); continue; }
     const rec = out[t.store]?.get(t.ref);
-    if (rec && (rec.updated ?? 0) <= (t.updated ?? 0)) out[t.store].delete(t.ref);
+    if (!rec) continue;
+    if ((rec.updated ?? 0) > (t.updated ?? 0)) out.meta.delete(t.id);
+    else out[t.store].delete(t.ref);
   }
   return Object.fromEntries(STORES.map((name) => [name, [...out[name].values()]]));
 }
@@ -108,6 +121,7 @@ function client() {
       if (resp.error) { finishAuth(new Error(resp.error_description || resp.error)); return; }
       conf.token = resp.access_token;
       conf.expires = Date.now() + (Number(resp.expires_in) || 3600) * 1000;
+      shareToken(conf.token, conf.expires, conf.email);
       store();
       finishAuth();
     },
@@ -136,14 +150,15 @@ function requestToken(prompt) {
 
 /** Підключити Диск (з натискання). Далі — syncNow. */
 export async function connect() {
-  await requestToken(conf.consented ? '' : 'consent');
+  // Увійшли в іншому застосунку автора менш ніж годину тому — вікно Google не потрібне
+  if (!tokenValid()) await requestToken(conf.consented ? '' : 'consent');
   conf.enabled = true;
   conf.consented = true;
   store();
 }
 
 export function disconnect() {
-  if (conf.token) window.google?.accounts?.oauth2?.revoke?.(conf.token, () => {});
+  // Вхід у Google не відкликаємо: він спільний з іншими застосунками автора — відключається лише цей
   conf = {};
   store();
 }
@@ -159,7 +174,7 @@ export async function refreshByGesture() {
   return true;
 }
 
-/** Ключ з натискання без обмеження частоти — для кнопки «Синхронізувати». */
+/** Ключ з натискання без обмеження частоти — для кнопки «Зберегти зараз». */
 export async function ensureToken() {
   if (!tokenValid()) await requestToken('');
 }
@@ -169,50 +184,28 @@ export async function ensureToken() {
 async function api(url, options = {}) {
   const res = await fetch(url, { ...options, headers: { Authorization: `Bearer ${conf.token}`, ...options.headers } });
   if (res.status === 401) {
+    dropSharedToken(conf.token);
     conf.token = null;
     store();
-    throw new AuthError('Сесія Google скінчилась — натисни «Синхронізувати»');
+    throw new AuthError('Сесія Google скінчилась — натисни «Зберегти зараз» у розділі Google Диск');
   }
-  if (!res.ok) throw new Error(`Google Диск відповів ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(`Google Диск відповів ${res.status}`), { status: res.status });
   return res;
 }
 
-/** Файл синхронізації: збережений id, якщо файл живий; інакше — пошук за назвою (drive.file бачить лише свої файли). */
-async function findFile() {
-  if (conf.fileId) {
-    try {
-      const meta = await (await api(`${DRIVE}/files/${conf.fileId}?fields=id,trashed`)).json();
-      if (!meta.trashed) return conf.fileId;
-    } catch (err) {
-      if (err instanceof AuthError) throw err;
-    }
-  }
-  const q = encodeURIComponent(`name='${FILE_NAME}' and trashed=false`);
-  const { files } = await (await api(`${DRIVE}/files?q=${q}&spaces=drive&orderBy=modifiedTime desc&fields=files(id)`)).json();
-  conf.fileId = files?.[0]?.id ?? null;
+/** Записати знімок у marnotrat-sync.json. false — інший телефон щойно завів файл: синхронізуватись ще раз, із ним. */
+async function upload(fileId, data) {
+  const res = await writeJson(api, { id: fileId, name: FILE_NAME, description: 'Марнотрат — дані для синхронізації', content: JSON.stringify(data) });
+  conf.fileId = res.id;
   store();
-  return conf.fileId;
+  return res.written;
 }
 
-/** Один файл, щоразу перезаписується: попередні версії Google Диск тримає сам (до 30 днів). */
-async function upload(fileId, data) {
-  const content = JSON.stringify(data);
-  if (fileId) {
-    await api(`${UPLOAD}/files/${fileId}?uploadType=media`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: content,
-    });
-    return;
-  }
-  const boundary = `mt${Date.now()}`;
-  const body = [
-    `--${boundary}`, 'Content-Type: application/json; charset=UTF-8', '',
-    JSON.stringify({ name: FILE_NAME, mimeType: 'application/json', description: 'Марнотрат — дані для синхронізації' }),
-    `--${boundary}`, 'Content-Type: application/json', '', content, `--${boundary}--`,
-  ].join('\r\n');
-  const created = await (await api(`${UPLOAD}/files?uploadType=multipart&fields=id`, {
-    method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body,
-  })).json();
-  conf.fileId = created.id;
+/** Чий це Диск — запам'ятати раз: без пошти спільний ключ з іншого застосунку не підхоплюємо (див. google-token.js). */
+async function learnEmail() {
+  if (conf.email) return;
+  conf.email = await whoIs(conf.token);
+  noteEmail(conf.token, conf.email);
   store();
 }
 
@@ -222,16 +215,60 @@ async function upload(fileId, data) {
  * стартових монет — інакше «Готівка» задвоїлась би). Повертає злитий знімок або null, якщо локально нічого не змінилось.
  */
 export async function syncNow(local, { fresh = false, envelope = {} } = {}) {
-  if (!tokenValid()) throw new AuthError('Потрібно увійти в Google — натисни «Синхронізувати»');
-  const id = await findFile();
+  if (!tokenValid()) throw new AuthError('Потрібно увійти в Google — натисни «Зберегти зараз» у розділі Google Диск');
+  await learnEmail();
+  const id = await locate(api, FILE_NAME, conf.fileId);
+  conf.fileId = id;
   let remote = null;
-  if (id) remote = await (await api(`${DRIVE}/files/${id}?alt=media`)).json();
+  if (id) remote = await readJson(api, id);
   if (remote && remote.app !== 'marnotrat') throw new Error('Файл на Диску — не Марнотрат');
   const merged = remote ? (fresh ? merge({}, remote) : merge(local, remote)) : merge(local, {});
   if (!remote || stamp(remote) !== stamp(merged)) {
-    await upload(id, { app: 'marnotrat', ...envelope, synced: new Date().toISOString(), ...merged });
+    // Інший телефон щойно завів файл — злити з ним, а не затерти його
+    if (!(await upload(id, { app: 'marnotrat', ...envelope, synced: new Date().toISOString(), ...merged }))) {
+      return syncNow(local, { fresh, envelope });
+    }
   }
   conf.last = Date.now();
   store();
+  // Налаштування бота — не дані Марнотрату: збій тут синхронізацію не валить
+  try {
+    await syncBotSettings();
+  } catch (err) {
+    if (err instanceof AuthError) throw err;
+  }
   return stamp(local) === stamp(merged) ? null : merged;
+}
+
+/** Копія з Диска для «Відновити з Диска»: вміст marnotrat-sync.json або null — файлу ще нема. */
+export async function fetchBackup() {
+  if (!tokenValid()) await requestToken('');
+  const id = await locate(api, FILE_NAME, conf.fileId);
+  return id ? readJson(api, id) : null;
+}
+
+// ---------- спільні налаштування бота ----------
+
+/**
+ * Лише bot-settings.json, без даних: при відкритті й коли бот відкинув ключ — вставлений на іншому пристрої ключ
+ * приходить одразу, а не з добовою копією. Ключ Google мертвий — тихо до наступного разу.
+ */
+let botRoundBusy = null;
+export function botRound() {
+  if (!syncOn() || !navigator.onLine || !tokenValid()) return Promise.resolve();
+  botRoundBusy ??= learnEmail().then(syncBotSettings).catch(() => {}).finally(() => { botRoundBusy = null; });
+  return botRoundBusy;
+}
+
+/** Адреса й ключ бота — спільний bot-settings.json (drive-files.js): новіший з Диска — сюди, свій новіший — на Диск. */
+async function syncBotSettings() {
+  conf.botFileId = await syncBotFile(api, conf.botFileId, {
+    mine: Bot.sharedConfig(),
+    isBad: Bot.isBadKey,
+    apply: (theirs) => {
+      Bot.setSharedConfig(theirs.url, theirs.key, theirs.updated);
+      window.dispatchEvent(new Event('bot-config'));
+    },
+  });
+  store();
 }

@@ -1,9 +1,10 @@
 // Марнотрат: головна з монетами, екран суми, стрічка, звіти, налаштування.
 import { loadAll, write, uid, replaceAll, putFile, getFile, dropFilesExcept } from './db.js';
-import { slAvailable, readJournal, addRecord, patchRecord, removeRecord } from './journal.js';
+import { slAvailable, readJournal, addRecord, patchRecord, removeRecord, unlinkJournal } from './journal.js';
 import * as M from './model.js';
 import * as Sync from './sync.js';
-import { demoChanges, demoRemoval, hasDemo } from './demo.js';
+import * as Bot from './bot.js';
+import { cursors, exchange } from './cloud.js';
 import { CHANGES, changesSince } from './changes.js';
 import { $, h, icon, hasIcon, toast, sheet, closeSheet, chips, swipeStep, vibrate } from './ui.js';
 
@@ -37,7 +38,23 @@ function recall(key) {
   try { return localStorage.getItem(PREFIX + key); } catch { return null; }
 }
 
-const coin = (id) => state.coins.find((c) => c.id === id);
+// ---------- кеш підрахунків ----------
+
+// save() і синхронізація не правлять масиви state, а підміняють їх — тож кеш живий, доки ті самі масиви
+let memo = { ops: null, coins: null, meta: null, data: {} };
+
+function cached(key, build) {
+  const { ops, coins, meta } = state;
+  if (memo.ops !== ops || memo.coins !== coins || memo.meta !== meta) memo = { ops, coins, meta, data: {} };
+  if (!(key in memo.data)) memo.data[key] = build();
+  return memo.data[key];
+}
+
+const coin = (id) => cached('byId', () => {
+  const byId = new Map();
+  for (const c of state.coins) if (!byId.has(c.id)) byId.set(c.id, c);
+  return byId;
+}).get(id);
 // Режим «Редагування» головної (довге натискання на монету): ✕ і ✎ на монетах, перестановка перетягуванням
 const editing = () => view === 'edit';
 const onMain = () => view === 'main' || view === 'edit';
@@ -71,6 +88,110 @@ async function save(changes, { redraw = true } = {}) {
   }
   if (redraw) render();
   scheduleSync();
+  scheduleCloud();
+  Bot.scheduleBot(botPayload);
+}
+
+// ---------- підсумки в Telegram (бот Хобі-плану) ----------
+
+// Скільки днів віддаємо боту: тиждень, минулий тиждень для порівняння й запас на день без зв'язку
+const BOT_DAYS = 35;
+
+/**
+ * Що бачить бот: за кожен день від from — витрати й доходи в гривнях і витрати за категоріями (найбільші спершу),
+ * плюс бюджет поточного місяця обліку, як «Лишилось» у шапці.
+ */
+function botPayload() {
+  const from = M.addDays(M.ymd(), -(BOT_DAYS - 1));
+  const days = new Map();
+  for (const op of state.ops) {
+    if (op.date < from) continue;
+    const t = opType(op);
+    if (t === 'transfer') continue;
+    let d = days.get(op.date);
+    if (!d) days.set(op.date, (d = { date: op.date, expense: 0, income: 0, cats: new Map() }));
+    if (t === 'income') { d.income += toUah(op.amount, coinOr(op.from).currency); continue; }
+    const c = coinOr(op.to);
+    const v = toUah(amountIn(op), c.currency);
+    d.expense += v;
+    d.cats.set(c.name, (d.cats.get(c.name) ?? 0) + v);
+  }
+  const round = (v) => M.round2(v);
+  const plan = planTotal();
+  return {
+    from,
+    days: [...days.values()].map((d) => ({
+      date: d.date, expense: round(d.expense), income: round(d.income),
+      cats: [...d.cats].sort((a, b) => b[1] - a[1]).map(([name, v]) => [name, round(v)]),
+    })),
+    budget: plan ? { plan: round(plan), left: round(plan - totals(currentPeriod()).expense) } : null,
+  };
+}
+
+/** Бот відкидає ключ — на головній: інакше операції тихо не їдуть на інші телефони. */
+function keyNote() {
+  if (!Bot.keyProblem()) return null;
+  return h('div', { class: 'key-note', role: 'alert' },
+    h('b', {}, 'Ключ доступу не підходить'),
+    h('span', {}, ' — операції не йдуть на інші телефони. Візьми новий ключ командою /key у Telegram-боті й встав у будь-якому застосунку: Хобі-план, Вага чи тут. '),
+    h('button', { type: 'button', class: 'btn primary', onClick: () => { remember('fold-data', 'open'); go('settings'); } }, 'Вставити ключ'));
+}
+
+/** Адреса сервера й ключ доступу: вставлені тут, у Хобі-плані чи Вазі на цьому телефоні — одні на всіх. */
+function botKeyForm(cfg) {
+  const url = h('input', { type: 'url', placeholder: 'https://….workers.dev', value: cfg?.url ?? '' });
+  const key = h('input', { type: 'password', placeholder: 'команда /key у Telegram-боті', value: cfg?.key ?? '' });
+  const save = () => {
+    const u = url.value.trim();
+    const k = key.value.trim();
+    if (!u.startsWith('https://') || !k) { toast('Вкажи адресу https://… і ключ'); return; }
+    Bot.setSharedConfig(u, k);
+    cloud.error = '';
+    scheduleCloud(0);
+    Bot.scheduleBot(botPayload, 0);
+    toast('Ключ збережено — перевіряю');
+    render();
+  };
+  return h('div', { class: 'form' },
+    h('label', {}, 'Адреса сервера', url),
+    h('label', {}, 'Ключ доступу', key),
+    h('div', { class: 'btn-grid' },
+      h('button', { type: 'button', class: `btn${cfg ? '' : ' primary'}`, onClick: save }, icon('check'), 'Зберегти'),
+      cfg ? h('button', { type: 'button', class: 'btn primary', onClick: () => runCloud({ loud: true }) }, icon('refresh'), 'Обмінятися зараз') : null,
+      cfg ? h('button', { type: 'button', class: 'btn', onClick: () => { Bot.disconnect(); toast('Синхронізацію вимкнено лише тут'); render(); } }, icon('close'), 'Вимкнути синхронізацію') : null));
+}
+
+/** Налаштування: бот підключено — дані, підсумки й ключ; ні — як підключити. */
+/** «Синхронізація»: стан обміну, адреса й ключ (спільні для застосунків), а нижче — підсумки в Telegram. */
+function botCard() {
+  const cfg = Bot.botConfig();
+  const fmtWhen = (t) => new Date(t).toLocaleString('uk-UA', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
+  const synced = cloudCur.last();
+  const bad = Bot.keyProblem() || Boolean(cloud.error);
+  const state = Bot.keyProblem() ? 'Ключ доступу не підходить — візьми новий командою /key у Telegram-боті й встав нижче.'
+    : !cfg ? 'Не ввімкнено.'
+      : cloud.error ? `Помилка: ${cloud.error}.` : synced ? `Обмін: ${fmtWhen(synced)}.` : 'Обміну ще не було.';
+  const card = h('section', { class: 'card set-card' },
+    h('h2', {}, 'Синхронізація'),
+    h('p', { class: bad ? 'small error-text' : 'muted small' }, state),
+    h('p', { class: 'muted small' },
+      'Монети й операції лежать у спільній базі на сервері — однакові на всіх телефонах; без інтернету все піде пізніше. Ключ доступу дає команда /key у Telegram-боті; досить вставити в одному застосунку — Хобі-план, Вага чи тут.'),
+    botKeyForm(cfg));
+  if (!cfg) return card;
+  const on = Bot.botOn();
+  const last = Bot.lastSent();
+  card.append(
+    h('h3', {}, 'Telegram-бот · підсумки'),
+    chips([['on', 'Увімкнено'], ['off', 'Вимкнено']], on ? 'on' : 'off', (v) => {
+      Bot.setBotOn(v === 'on');
+      if (v === 'on') Bot.scheduleBot(botPayload, 0);
+      render();
+    }),
+    h('p', { class: 'muted small' }, on
+      ? [Bot.lastError() ? `Помилка: ${Bot.lastError()}. ` : last ? `Надіслано ${fmtWhen(last)}. ` : 'Ще не надсилалось. ',
+        'Суми йдуть самі після кожної зміни, а гроші приходять у вечірньому підсумку бота. Боту йдуть лише суми за дні й категорії та бюджет місяця — без операцій і коментарів. Час підсумку — у Хобі-плані.']
+      : 'Гроші в вечірній підсумок бота не потраплять.'));
+  return card;
 }
 
 // ---------- синхронізація з Google Диском ----------
@@ -85,21 +206,26 @@ function scheduleSync() {
   sync.timer = setTimeout(() => runSync(), 2000);
 }
 
+// Підключено бота — дані між телефонами возить його база, а Диск раз на день зберігає копію
+const BACKUP_EVERY = 24 * 60 * 60 * 1000;
+
 /** Один прохід синхронізації. gesture — викликано з натискання: можна оновити ключ Google. */
 async function runSync({ gesture = false, loud = false } = {}) {
   if (!Sync.syncOn() || !navigator.onLine) return;
+  if (!loud && Bot.botConfig() && Date.now() - (Sync.lastSync() ?? 0) < BACKUP_EVERY) { Sync.botRound(); return; }
   if (sync.busy) { sync.again = true; return; }
   sync.busy = true;
   try {
     if (loud) await Sync.ensureToken();
     else if (!Sync.tokenValid() && !(gesture && await Sync.refreshByGesture())) return;
     // Свого на цьому телефоні ще нічого — беремо Диск як є, без злиття стартових монет
-    const fresh = !Sync.lastSync() && !state.ops.some((o) => !o.demo);
+    const fresh = !Sync.lastSync() && !state.ops.length;
     const merged = await Sync.syncNow(snapshot(), { fresh, envelope: { version: self.APP_VERSION } });
     sync.error = '';
     if (merged) {
       // Поки ходили на Диск, тут могли щось змінити — зливаємо ще раз зі свіжим станом
       const final = fresh ? merged : Sync.merge(snapshot(), merged);
+      noteDroppedTombs(state.meta, final.meta);
       await replaceAll(final);
       Object.assign(state, final);
       if (Sync.stamp(final) !== Sync.stamp(merged)) sync.again = true;
@@ -113,12 +239,203 @@ async function runSync({ gesture = false, loud = false } = {}) {
   } finally {
     sync.busy = false;
     if (sync.again) { sync.again = false; scheduleSync(); }
+    refreshChip();
   }
+}
+
+// ---------- дані через базу бота (Cloudflare D1) ----------
+
+// Надгробки, які злиття викинуло (запис повернули, минуло 180 днів): у базі їх треба прибрати окремо,
+// інакше лишаються там назавжди й їдуть на кожен новий телефон. { id: коли викинули }
+const DROPS_KEY = 'cloud-drops';
+
+function readDrops() {
+  try { return JSON.parse(recall(DROPS_KEY) || '{}'); } catch { return {}; }
+}
+
+/** before — надгробки, що були (тут і з бази), after — що лишились після злиття. */
+function noteDroppedTombs(before, after) {
+  const kept = new Set(after.filter(Sync.isTomb).map((m) => m.id));
+  const drops = readDrops();
+  let added = 0;
+  for (const m of before) {
+    if (!Sync.isTomb(m) || kept.has(m.id) || m.id in drops) continue;
+    drops[m.id] = Date.now();
+    added += 1;
+  }
+  if (added) remember(DROPS_KEY, JSON.stringify(drops));
+  return added;
+}
+
+// Монети, операції й meta (з надгробками del:*) їздять між телефонами через базу бота Хобі-плану тим самим
+// ключем, що й підсумки. Злиття те саме, що з Диском (Sync.merge): перемагає новіший запис, надгробок — старіший.
+const CLOUD = 'marnotrat';
+const cloudCur = cursors(CLOUD);
+const cloud = { timer: 0, busy: false, again: false, error: '' };
+
+function scheduleCloud(ms = 2000) {
+  if (!Bot.botConfig()) return;
+  clearTimeout(cloud.timer);
+  cloud.timer = setTimeout(() => runCloud(), ms);
+}
+
+/** Один обмін з базою бота. Без мережі — тихо: змінене поїде наступного разу (позначки не зсуваються). */
+async function runCloud({ loud = false } = {}) {
+  const cfg = Bot.botConfig();
+  if (!cfg) return;
+  if (cloud.busy) { cloud.again = true; return; }
+  cloud.busy = true;
+  try {
+    // Свого на цьому телефоні ще нічого — спершу взяти з бота, без стартових монет (інакше «Готівка» задвоїлась би)
+    const fresh = !cloudCur.last() && !state.ops.length;
+    const records = Sync.STORES.flatMap((store) => state[store].map((r) => ({ store, id: r.id, data: r, updated: r.updated ?? 0 })));
+    // Викинуті надгробки — у базу як видалені; той самий id знову надгробок (видалили вдруге) — не чіпаємо
+    const live = new Set(state.meta.filter(Sync.isTomb).map((m) => m.id));
+    const drops = Object.entries(readDrops()).filter(([id]) => !live.has(id));
+    records.push(...drops.map(([id, at]) => ({ store: 'meta', id, data: null, updated: at, deleted: true })));
+    let res;
+    try {
+      res = await exchange({ url: cfg.url, key: cfg.key, app: CLOUD, prefix: CLOUD, records, skipPush: fresh });
+    } catch (err) {
+      if (err.status === 401) {
+        Bot.markBad(cfg);
+        // Є інший ключ, якого бот ще не відкидав (Хобі-план, Диск) — одразу пробуємо його; ні — шукаємо на Диску
+        if (Bot.botConfig()) cloud.again = true;
+        else Sync.botRound();
+        render();
+      }
+      throw err;
+    }
+    Bot.markOk(cfg);
+    const { rows, commit } = res;
+    const remote = Object.fromEntries(Sync.STORES.map((name) => [name, []]));
+    for (const r of rows) if (!r.deleted && r.data?.id === r.id && remote[r.store]) remote[r.store].push(r.data);
+    const took = fresh && rows.length > 0 && !state.ops.length;
+    // Поки ходили до бота, тут могли щось змінити — зливаємо зі свіжим станом
+    const merged = took ? Sync.merge({}, remote) : Sync.merge(snapshot(), remote);
+    if (noteDroppedTombs([...state.meta, ...remote.meta], merged.meta)) cloud.again = true;
+    if (Sync.stamp(merged) !== Sync.stamp(snapshot())) {
+      await replaceAll(merged);
+      Object.assign(state, merged);
+      render();
+    }
+    // Новий телефон, а в боті порожньо — стартові монети лишаються й поїдуть наступним обміном
+    commit(!fresh || took);
+    // Видалення надгробків пішли в базу — більше не пам'ятаємо їх (крім викинутих щойно, під час обміну)
+    if (!fresh && drops.length) {
+      const left = readDrops();
+      for (const [id, at] of drops) if (left[id] === at) delete left[id];
+      remember(DROPS_KEY, JSON.stringify(left));
+    }
+    if (fresh && !took) cloud.again = true;
+    cloud.error = '';
+    if (loud) toast('Синхронізовано');
+  } catch (err) {
+    cloud.error = err.message === 'key' ? 'Ключ доступу не підходить — візьми новий командою /key у Telegram-боті'
+      : err instanceof TypeError ? 'Немає зв’язку з сервером' : err.message;
+    if (loud) toast(cloud.error);
+  } finally {
+    cloud.busy = false;
+    if (cloud.again) { cloud.again = false; scheduleCloud(500); }
+    if (view === 'settings' && !document.activeElement?.matches('input')) render();
+    else refreshChip();
+  }
+}
+
+// ---------- значок синхронізації в шапці: як у Хобі-плані й Вазі ----------
+
+const shortWhen = (ms) => {
+  const d = new Date(ms);
+  return M.ymd(d) === M.ymd()
+    ? d.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' })
+    : d.toLocaleDateString('uk-UA', { day: 'numeric', month: 'short' });
+};
+
+/** Основна синхронізація — база на сервері, без неї — Google Диск: idle «✓ час», syncing, offline, key, error. */
+function chipState() {
+  if (Bot.keyProblem()) return { st: 'key', text: 'ключ', title: 'Ключ доступу не підходить' };
+  const offline = { st: 'offline', text: 'офлайн', title: 'Немає інтернету — синхронізація пройде, щойно з’явиться зв’язок' };
+  if (Bot.botConfig()) {
+    if (!navigator.onLine) return offline;
+    if (cloud.error) return { st: 'error', text: 'помилка', title: cloud.error };
+    const at = cloudCur.last();
+    if (!at) return { st: 'syncing', text: '…', title: 'Синхронізую…' };
+    return { st: 'idle', text: `✓ ${shortWhen(at)}`, title: `Синхронізовано: ${shortWhen(at)}` };
+  }
+  if (!Sync.syncOn()) return null;
+  if (!navigator.onLine) return offline;
+  if (sync.error) return { st: 'error', text: 'помилка', title: sync.error };
+  const at = Sync.lastSync();
+  if (!at) return { st: 'syncing', text: '…', title: 'Синхронізую з Google Диском…' };
+  return { st: 'idle', text: `✓ ${shortWhen(at)}`, title: `Google Диск: ${shortWhen(at)}` };
+}
+
+function syncChip() {
+  const s = chipState();
+  if (!s) return null;
+  const onClick = () => {
+    if (s.st === 'key') { remember('fold-data', 'open'); go('settings'); return; }
+    if (s.st === 'offline') { toast(s.title); return; }
+    if (Bot.botConfig()) runCloud({ loud: true }); else runSync({ loud: true });
+  };
+  return h('button', { type: 'button', id: 'sync-chip', class: `sync-chip ${s.st}`, title: s.title, 'aria-label': `Синхронізація: ${s.title}`, onClick },
+    icon(s.st === 'key' ? 'warn' : 'refresh'), h('span', { class: 'chip-text' }, s.text));
+}
+
+/** Стан змінився без перемальовування сторінки — оновити лише шапку. */
+function refreshChip() {
+  if (view !== 'edit') topbar();
+}
+
+// Сьогоднішні витрати й залишок бюджету — для «Сьогодні» в Хобі-плані на цьому ж пристрої (спільний localStorage сайту)
+const MONEY_SHARE = 'vitaliylobko:money-today';
+
+function shareMoney() {
+  const today = M.ymd();
+  let spent = 0;
+  for (const op of state.ops) {
+    if (op.date !== today || opType(op) !== 'expense') continue;
+    spent += toUah(amountIn(op), coinOr(op.to).currency);
+  }
+  const plan = planTotal();
+  const v = JSON.stringify({ date: today, spent: M.round2(spent), left: plan ? M.round2(plan - totals(currentPeriod()).expense) : null });
+  try { if (localStorage.getItem(MONEY_SHARE) !== v) localStorage.setItem(MONEY_SHARE, v); } catch { /* приватний режим */ }
 }
 
 // ---------- підрахунки ----------
 
+/**
+ * Рухи монет одним проходом: id → { delta — усе прийшло мінус усе пішло; months — за періодом обліку
+ * { in, out, n — скільки операцій прийшло } }. Порядок додавання — як у state.ops, тож суми ті самі.
+ */
+const moves = () => cached('moves', () => {
+  const out = new Map();
+  const of = (id) => {
+    let m = out.get(id);
+    if (!m) out.set(id, (m = { delta: 0, months: new Map() }));
+    return m;
+  };
+  const month = (m, ym) => {
+    let x = m.months.get(ym);
+    if (!x) m.months.set(ym, (x = { in: 0, out: 0, n: 0 }));
+    return x;
+  };
+  for (const op of state.ops) {
+    const ym = periodOf(op.date);
+    const dst = of(op.to);
+    dst.delta += amountIn(op);
+    const x = month(dst, ym);
+    x.in += amountIn(op);
+    x.n += 1;
+    const src = of(op.from);
+    src.delta -= op.amount;
+    month(src, ym).out += op.amount;
+  }
+  return out;
+});
+
 function balance(acc, ops = state.ops) {
+  if (ops === state.ops) return M.round2((acc.start || 0) + (moves().get(acc.id)?.delta ?? 0));
   let v = acc.start || 0;
   for (const op of ops) {
     if (op.to === acc.id) v += amountIn(op);
@@ -168,13 +485,11 @@ const inMonth = (op, ym) => {
   return op.date >= lo && op.date <= hi;
 };
 
-function monthSpent(c, ym) {
-  return state.ops.reduce((s, op) => (op.to === c.id && inMonth(op, ym) ? s + amountIn(op) : s), 0);
-}
+const monthMoves = (c, ym) => moves().get(c.id)?.months.get(ym);
 
-function monthIncome(c, ym) {
-  return state.ops.reduce((s, op) => (op.from === c.id && inMonth(op, ym) ? s + op.amount : s), 0);
-}
+const monthSpent = (c, ym) => monthMoves(c, ym)?.in ?? 0;
+
+const monthIncome = (c, ym) => monthMoves(c, ym)?.out ?? 0;
 
 /** Як операція міняє гроші на рахунках, у гривнях: дохід +, витрата −, переказ — лише різниця курсів. */
 // Що входить у «Баланс»: рахунки й борги з позначкою «враховувати»; ціль — відкладене, не входить
@@ -191,16 +506,26 @@ function accDelta(op) {
 
 /** Витрати й доходи в гривнях: за день («РРРР-ММ-ДД») чи за період обліку (ключ «РРРР-ММ»). */
 function totals(key) {
-  let expense = 0;
-  let income = 0;
-  const hit = key.length === 7 ? (op) => inMonth(op, key) : (op) => op.date === key;
-  for (const op of state.ops) {
-    if (!hit(op)) continue;
-    const t = opType(op);
-    if (t === 'expense') expense += toUah(amountIn(op), coinOr(op.to).currency);
-    else if (t === 'income') income += toUah(op.amount, coinOr(op.from).currency);
-  }
-  return { expense, income };
+  const all = cached('totals', () => {
+    const out = new Map();
+    const add = (k, field, v) => {
+      let x = out.get(k);
+      if (!x) out.set(k, (x = { expense: 0, income: 0 }));
+      x[field] += v;
+    };
+    for (const op of state.ops) {
+      const t = opType(op);
+      let v;
+      if (t === 'expense') v = toUah(amountIn(op), coinOr(op.to).currency);
+      else if (t === 'income') v = toUah(op.amount, coinOr(op.from).currency);
+      else continue;
+      add(periodOf(op.date), t, v);
+      add(op.date, t, v);
+    }
+    return out;
+  });
+  const x = all.get(key);
+  return { expense: x?.expense ?? 0, income: x?.income ?? 0 };
 }
 
 const totalBalance = () => state.coins.filter(inBalance).reduce((s, a) => s + toUah(balance(a), a.currency), 0);
@@ -230,7 +555,7 @@ function headStats() {
 
 /** Колір монети витрати за поточний місяць — з темпом і кількістю операцій. */
 function coinBudget(c, spent, ym = currentPeriod()) {
-  const count = state.ops.filter((op) => op.to === c.id && inMonth(op, ym)).length;
+  const count = monthMoves(c, ym)?.n ?? 0;
   const elapsed = ym === currentPeriod() ? periodElapsed(ym) : 1;
   return M.budgetState(spent, c.budget, { elapsed, count });
 }
@@ -287,12 +612,10 @@ function coinEl(c, ym) {
     // Ціль: відкладено / скільки треба; кільце — частка зібраного
     sum = balance(c);
     fill = c.budget ? Math.min(1, Math.max(0, sum / c.budget)) : 0;
-    if (c.budget) sub = M.num(c.budget);
     if (c.budget && sum >= c.budget) st = 'done';
   } else {
     sum = monthSpent(c, ym);
     ({ st, fill } = coinBudget(c, sum, ym));
-    if (c.budget) sub = M.num(c.budget);
   }
   const face = h('div', { class: 'coin-face', style: { '--fill': String(fill) } },
     c.kind === 'expense' ? h('span', { class: 'coin-fill' }) : null,
@@ -357,26 +680,27 @@ function pager(key, items, perPage, cls) {
   return h('div', { class: `pager ${cls}` }, track, dots);
 }
 
-/** Рядок на головній: заплановані повтори, яким уже пора, — тап веде в стрічку. */
-function planHint() {
-  if (editing()) return null;
+/**
+ * Що чекає уваги: повтори, яким пора, прострочені борги, гарантії, що спливають.
+ * На головній — лише лічильник на кнопці меню (місце — монетам), самі рядки — групою в меню.
+ */
+function alerts() {
   const n = dueCount();
   // Борги, яким настав строк і які ще не закриті
   const late = coinsOf('debt').filter((c) => c.due && c.due <= M.ymd() && Math.abs(balance(c)) >= 0.01);
   const rows = late.map((c) => {
     const bal = balance(c);
-    return h('button', { type: 'button', class: 'plan-hint debt', onClick: () => openFeed(c.id) }, icon('handshake'),
-      `${c.name}: ${bal > 0 ? 'час повернути тобі' : 'час віддати'} ${M.money(Math.abs(bal), c.currency)}`, icon('next'));
+    return { cls: 'debt', ico: 'handshake', to: `feed/${c.id}`, text: `${c.name}: ${bal > 0 ? 'час повернути тобі' : 'час віддати'} ${M.money(Math.abs(bal), c.currency)}` };
   });
-  if (n) rows.unshift(h('button', { type: 'button', class: 'plan-hint', onClick: () => go('feed') }, icon('refresh'), `До проведення: ${n}`, icon('next')));
+  if (n) rows.unshift({ cls: '', ico: 'refresh', to: 'feed', text: `До проведення: ${n}` });
   // Гарантія спливає за місяць — ще є час звернутись
   const ending = warrantyOps().filter((op) => daysLeft(op.warranty) >= 0 && daysLeft(op.warranty) <= WARRANTY_SOON);
   if (ending.length) {
     const first = ending[0];
-    rows.push(h('button', { type: 'button', class: 'plan-hint warranty', onClick: () => go('warranty') }, icon('shield'),
-      ending.length === 1 ? `Гарантія: ${opName(first)} — до ${dmy(first.warranty)}` : `Гарантія спливає: ${ending.length} покупки за місяць`, icon('next')));
+    rows.push({ cls: 'warranty', ico: 'shield', to: 'warranty',
+      text: ending.length === 1 ? `Гарантія: ${opName(first)} — до ${dmy(first.warranty)}` : `Гарантія спливає: ${ending.length} покупки за місяць` });
   }
-  return rows.length ? rows : null;
+  return rows;
 }
 
 function viewMain() {
@@ -385,10 +709,10 @@ function viewMain() {
   // Цілі стоять у сітці витрат, як копилка
   const grid = state.coins.filter((c) => (c.kind === 'expense' || c.kind === 'goal') && !c.archived).sort((a, b) => a.order - b.order);
   return h('div', { class: `main${editing() ? ' editing' : ''}` },
+    keyNote(),
     incomeOpen ? pager('income', [...coinsOf('income').map((c) => coinEl(c, ym)), addCoinEl('income')], 4, 'coin-row incomes') : null,
     pager('account', [...state.coins.filter((c) => (c.kind === 'account' || c.kind === 'debt') && !c.archived)
       .sort((a, b) => a.order - b.order).map((c) => coinEl(c, ym)), addCoinEl('account')], 4, 'coin-row accounts'),
-    planHint(),
     pager('expense', [...grid.map((c) => coinEl(c, ym)), addCoinEl('expense')], 16, 'expenses'),
     state.ops.length ? null : h('p', { class: 'muted small main-hint' },
       'Тягни монету пальцем: дохід — на рахунок, рахунок — на витрату чи інший рахунок. Тап — історія монети, довге натискання — змінити.'));
@@ -608,7 +932,14 @@ function bindCoin(el, face, c) {
         return at.y >= r.top && at.y <= r.bottom;
       });
       const r = track?.getBoundingClientRect();
-      const dir = !r ? 0 : at.x < r.left + PAGE_EDGE ? -1 : at.x > r.right - PAGE_EDGE ? 1 : 0;
+      let dir = !r ? 0 : at.x < r.left + PAGE_EDGE ? -1 : at.x > r.right - PAGE_EDGE ? 1 : 0;
+      // Гортати є куди — край ряду світиться стрілкою: «тримай тут, перегорну»
+      if (dir < 0 && track.scrollLeft < 1) dir = 0;
+      if (dir > 0 && track.scrollLeft + track.clientWidth >= track.scrollWidth - 1) dir = 0;
+      for (const p of document.querySelectorAll('.pager')) {
+        p.classList.toggle('edge-l', dir < 0 && p === track.parentElement);
+        p.classList.toggle('edge-r', dir > 0 && p === track.parentElement);
+      }
       const now = performance.now();
       if (!dir) drag.edgeAt = 0;
       else if (!drag.edgeAt) drag.edgeAt = now;
@@ -630,6 +961,11 @@ function bindCoin(el, face, c) {
       const ok = editing() ? (dst) => canReorder(c, dst) : (dst) => canDrop(c, dst);
       for (const t of document.querySelectorAll('.coin[data-id]')) {
         if (ok(coin(t.dataset.id))) t.classList.add('drop-ok');
+      }
+      // Крапка сторінки, де є куди кинути, — підсвічена: видно, що ціль далі, за краєм
+      for (const track of document.querySelectorAll('.pager-track')) {
+        const dots = track.nextElementSibling?.children ?? [];
+        [...track.children].forEach((page, i) => dots[i]?.classList.toggle('target', Boolean(page.querySelector('.drop-ok'))));
       }
       drag = { ghost, over: null, raf: 0 };
       vibrate();
@@ -681,6 +1017,8 @@ function bindCoin(el, face, c) {
       document.body.classList.remove('dragging');
       el.classList.remove('drag-src');
       for (const t of document.querySelectorAll('.drop-ok, .drop-over')) t.classList.remove('drop-ok', 'drop-over');
+      for (const t of document.querySelectorAll('.pager-dots .target')) t.classList.remove('target');
+      for (const p of document.querySelectorAll('.pager.edge-l, .pager.edge-r')) p.classList.remove('edge-l', 'edge-r');
       drag = null;
     }
     addEventListener('pointermove', onMove, { passive: false });
@@ -1041,7 +1379,15 @@ function opRow(op) {
 async function deleteOp(op) {
   if (refuse([], [op.id])) return;
   await save({ ops: { del: [op.id] } });
-  toast('Операцію видалено', { label: 'Скасувати', run: () => save({ ops: { put: [{ ...op }] } }) });
+  // Що операція записала в Стрілецький журнал (патрони, тюнінг, екіпірування) — теж прибрати
+  const relink = await unlinkJournal(op.sl).catch(() => null);
+  toast(relink ? `Операцію видалено — і з журналу (${op.sl.text})` : 'Операцію видалено', {
+    label: 'Скасувати',
+    run: async () => {
+      await save({ ops: { put: [{ ...op }] } });
+      if (relink) await relink().catch(() => toast('У журнал не повернулось — додай там вручну'));
+    },
+  });
 }
 
 /**
@@ -1108,10 +1454,20 @@ const PLAN_BACKLOG = 10;
  */
 function planned() {
   const today = M.ymd();
+  return cached(`planned:${today}`, () => plannedOn(today));
+}
+
+function plannedOn(today) {
   const out = [];
+  const doneBy = new Map();
+  for (const o of state.ops) {
+    if (o.fromRule == null) continue;
+    if (!doneBy.has(o.fromRule)) doneBy.set(o.fromRule, new Set());
+    doneBy.get(o.fromRule).add(o.ruleDate);
+  }
   for (const rule of state.ops) {
     if (!rule.repeat?.every) continue;
-    const done = new Set(state.ops.filter((o) => o.fromRule === rule.id).map((o) => o.ruleDate));
+    const done = doneBy.get(rule.id) ?? new Set();
     const skip = new Set(rule.repeat.skip ?? []);
     const dates = M.repeatDates(rule.date, rule.repeat.every, rule.repeat.until, today).filter((x) => !done.has(x) && !skip.has(x));
     const due = dates.filter((x) => x <= today).slice(-PLAN_BACKLOG);
@@ -1160,7 +1516,9 @@ function planMenu(p) {
       }, icon('close'), 'Зупинити повтор'))));
 }
 
-const byNewest = (a, b) => b.date.localeCompare(a.date) || (b.created ?? b.updated ?? 0) - (a.created ?? a.updated ?? 0);
+// Дати «РРРР-ММ-ДД» — просте порівняння рядків; localeCompare на тисячах операцій помітно повільніший
+const cmp = (x, y) => (x > y) - (x < y);
+const byNewest = (a, b) => cmp(b.date, a.date) || (b.created ?? b.updated ?? 0) - (a.created ?? a.updated ?? 0);
 
 /**
  * Підсумок дня в стрічці однієї монети — «зміна» в її валюті: витрата — мінус витрачене,
@@ -1236,8 +1594,9 @@ function feedList() {
     const real = ops.filter((op) => !op.plan);
     out.push(h('p', { class: 'feed-found' }, `Знайдено: ${real.length}`, feedType === 'transfer' ? null : h('b', {}, signedUah(opsChange(real)))));
   }
+  const byDay = Map.groupBy(ops, (op) => op.date);
   for (const date of shown) {
-    const dayOps = ops.filter((op) => op.date === date);
+    const dayOps = byDay.get(date);
     let foot;
     if (feedCoin) foot = coinDayFoot(coin(feedCoin), dayOps);
     else if (filtered) {
@@ -1269,7 +1628,22 @@ function viewFeed() {
     onInput: (e) => { feedQuery = e.target.value; clearTimeout(timer); timer = setTimeout(() => list.replaceChildren(...feedList()), 150); },
   });
   const types = feedCoin ? null : chips(FEED_TYPES, feedType, (v) => { feedType = v; list.replaceChildren(...feedList()); });
-  return h('div', { class: 'page stack feed-page' }, h('div', { class: 'feed-tools' }, search, types), list);
+  return h('div', { class: 'page stack feed-page' }, feedCoin ? budgetCard(coin(feedCoin)) : null, h('div', { class: 'feed-tools' }, search, types), list);
+}
+
+/** Ліміт монети смужкою в її стрічці (під монетою на головній цифри немає); колір — за темпом, як у монети. */
+function budgetCard(c) {
+  if (!c?.budget || (c.kind !== 'expense' && c.kind !== 'goal')) return null;
+  const goal = c.kind === 'goal';
+  const done = goal ? balance(c) : monthSpent(c, currentPeriod());
+  const st = goal ? (done >= c.budget ? 'done' : '') : coinBudget(c, done).st;
+  const left = c.budget - done;
+  const m = (v) => M.money(v, c.currency);
+  return h('div', { class: `card budget-card${st ? ` st-${st}` : ''}` },
+    h('div', { class: 'budget-nums' },
+      h('span', {}, goal ? 'Зібрано ' : 'Витрачено ', h('b', {}, m(done)), ` з ${m(c.budget)}`),
+      h('b', { class: left < 0 ? 'minus' : '' }, left < 0 ? `понад ${m(-left)}` : goal ? `ще ${m(left)}` : `лишилось ${m(left)}`)),
+    h('div', { class: 'budget-bar' }, h('span', { style: { width: `${Math.min(100, Math.max(0, (done / c.budget) * 100))}%` } })));
 }
 
 // ---------- звіти ----------
@@ -1693,13 +2067,10 @@ function viewSettings() {
   const rateStatus = h('p', { class: 'muted small' }, m.manual ? 'Свій курс — НБУ не підтягується' : m.date ? `Курс НБУ на ${M.dateTitle(m.date)}` : 'Курс за замовчуванням — підтягну НБУ, щойно буде зв’язок');
   const file = h('input', { type: 'file', accept: 'application/json,.json', hidden: true, onChange: (e) => importBackup(e.target.files[0]) });
   const theme = chips(THEMES, recall('theme') || 'auto', (v) => { remember('theme', v); applyTheme(); });
-  return h('div', { class: 'page stack' },
-    aboutPanel(),
-    // Версія й «Перевірити оновлення» — одразу під «Про застосунок», а не в самому низу
-    aboutCard(),
-    h('section', { class: 'card set-card' }, h('h2', {}, 'Тема'), theme),
-    periodCard(),
-    h('section', { class: 'card set-card' },
+  return h('div', { class: 'page' },
+    settingsGroup('Про застосунок', [aboutPanel(), aboutCard()]),
+    settingsGroup('Облік', [periodCard(),
+      h('section', { class: 'card set-card' },
       h('h2', {}, 'Курси до гривні'),
       h('div', { class: 'rate-row' }, h('b', {}, '$'), rateInput('USD')),
       h('div', { class: 'rate-row' }, h('b', {}, '€'), rateInput('EUR')),
@@ -1708,25 +2079,42 @@ function viewSettings() {
         type: 'button', class: 'btn', onClick: async () => {
           try { await fetchRates(true); toast('Курс НБУ оновлено'); render(); } catch (err) { toast(err instanceof TypeError ? 'Немає зв’язку з НБУ' : err.message); }
         },
-      }, icon('refresh'), 'Курс НБУ на сьогодні')),
-    syncCard(),
-    demoCard(),
-    h('section', { class: 'card set-card' },
-      h('h2', {}, 'Резервна копія'),
-      h('p', { class: 'muted small' }, Sync.syncOn()
-        ? 'Файл JSON з усіма даними — про всяк випадок, окремо від Google Диска.'
-        : 'Без Google Диска все зберігається лише на цьому телефоні. Копія — файл JSON: зберігай його, щоб не втратити дані.'),
-      h('div', { class: 'btn-grid' },
-        h('button', { type: 'button', class: 'btn', onClick: exportBackup }, icon('archive'), 'Зберегти копію'),
-        h('button', { type: 'button', class: 'btn', onClick: () => file.click() }, icon('undo'), 'Відновити')),
-      file),
-    hiddenCard(),
-    h('section', { class: 'card set-card' },
+      }, icon('refresh'), 'Курс НБУ на сьогодні'))], { fold: 'account' }),
+    settingsGroup(`Сховані монети · ${state.coins.filter((c) => c.archived).length}`, [hiddenCard()], { fold: 'hidden' }),
+    settingsGroup('Вигляд', [h('section', { class: 'card set-card' }, h('h2', {}, 'Тема'), theme)], { fold: 'look' }),
+    settingsGroup('Дані', [botCard(), syncCard(),
+      h('section', { class: 'card set-card' },
+        h('h2', {}, 'Копія у файл'),
+        h('p', { class: 'muted small' }, 'Файл JSON з усіма даними — про всяк випадок; його можна відновити на іншому телефоні.'),
+        h('div', { class: 'btn-grid' },
+          h('button', { type: 'button', class: 'btn', onClick: exportBackup }, icon('archive'), 'Зберегти копію'),
+          h('button', { type: 'button', class: 'btn', onClick: () => file.click() }, icon('undo'), 'Відновити з файлу')),
+        file)], { fold: 'data' }),
+    settingsGroup('Небезпечна зона', [h('section', { class: 'card set-card' },
       h('h2', {}, 'Почати з чистого'),
       h('p', { class: 'muted small' }, Sync.syncOn()
         ? 'Стерти всі монети й операції — тут, на Google Диску й на інших твоїх телефонах. Лишаться стартові монети.'
         : 'Стерти всі монети й операції на цьому телефоні. Лишаться стартові монети.'),
-      h('button', { type: 'button', class: 'btn danger', onClick: wipeAll }, icon('close'), 'Стерти всі дані')));
+      h('button', { type: 'button', class: 'btn danger', onClick: wipeAll }, icon('close'), 'Стерти всі дані'))], { danger: true }));
+}
+
+/** Група налаштувань, як у Стрілецькому журналі: рамка з назвою на лінії, розділи всередині — через лінію. */
+/** fold — назва для пам'яті: група згорнута, доки її не розгорнули; порожня згорнута — не показується. */
+function settingsGroup(title, sections, { danger = false, fold = '' } = {}) {
+  const items = sections.filter(Boolean);
+  if (!fold) return h('fieldset', { class: `settings-group${danger ? ' danger' : ''}` }, h('legend', {}, title), items);
+  if (!items.length) return null;
+  const key = `fold-${fold}`;
+  const group = h('fieldset', { class: `settings-group${recall(key) === 'open' ? '' : ' closed'}` });
+  const toggle = h('button', {
+    type: 'button', class: 'group-toggle', 'aria-expanded': String(!group.classList.contains('closed')), onClick: () => {
+      const closed = group.classList.toggle('closed');
+      toggle.setAttribute('aria-expanded', String(!closed));
+      remember(key, closed ? '' : 'open');
+    },
+  }, icon('chevron'), title);
+  group.append(h('legend', {}, toggle), ...items);
+  return group;
 }
 
 /** Сховані монети: повернути (сховав помилково) чи видалити разом з операціями. Нема схованих — картки нема. */
@@ -1760,6 +2148,7 @@ function hiddenCard() {
           type: 'button', class: 'btn danger', onClick: async () => {
             closeSheet();
             await save({ coins: { del: [c.id] }, ops: { del: ops.map((o) => o.id) } }, { redraw: false });
+            for (const o of ops) await unlinkJournal(o.sl).catch(() => null);
             toast(`«${c.name}» видалено`);
             render();
           },
@@ -1767,7 +2156,6 @@ function hiddenCard() {
         h('button', { type: 'button', class: 'btn', onClick: () => closeSheet() }, 'Скасувати'))));
   };
   return h('section', { class: 'card set-card' },
-    h('h2', {}, 'Сховані монети'),
     h('p', { class: 'muted small' }, 'Їх немає на головній, але операції лишаються й рахуються. Сховав помилково — «Повернути».'),
     list.map((c) => h('div', { class: 'hidden-row' },
       miniCoin(c),
@@ -1820,8 +2208,7 @@ function aboutPanel() {
       h('li', {}, 'Встанови застосунок: Android — Chrome → ⋮ → «Встановити застосунок»; iPhone — Safari → «Поділитися» → «На екран „Додому“».'),
       h('li', {}, 'Довге натискання на монету — режим «Редагування»: назва, іконка, бюджет, переставити, прибрати. «+» у ряду — нова монета.'),
       h('li', {}, 'Дохід → рахунок, рахунок → витрата чи ціль, рахунок → рахунок: тягни монету пальцем на іншу й введи суму.'),
-      h('li', {}, 'Тап по монеті — її операції. У стрічці свайп вліво — видалити, вправо — змінити.'),
-      h('li', {}, 'Хочеш спершу подивитись — «Демо-дані» вище, потім «Прибрати демо».'))),
+      h('li', {}, 'Тап по монеті — її операції. У стрічці свайп вліво — видалити, вправо — змінити.'))),
     h('p', { class: 'muted small' },
       link('https://github.com/VitaliyLobko/marnotrat/issues/new', 'Повідомити про помилку'), ' · ',
       link('https://github.com/VitaliyLobko/marnotrat', 'Вихідний код')));
@@ -1895,6 +2282,7 @@ function showWhatsNew() {
   if (list.length) changesSheet(list.slice(0, 4), `Що нового в ${current}`);
 }
 
+/** «Google Диск»: з ботом — щоденна копія, без бота — синхронізація між телефонами. */
 function syncCard() {
   const on = Sync.syncOn();
   const last = Sync.lastSync();
@@ -1906,46 +2294,28 @@ function syncCard() {
     } catch (err) { toast(err.message); }
     render();
   };
+  const restore = async () => {
+    try {
+      const data = await Sync.fetchBackup();
+      if (!data) { toast('На Диску ще немає копії'); return; }
+      importData(data, 'Копія з Google Диска');
+    } catch (err) { toast(err.message); }
+  };
   const off = () => sheet('Відключити Google Диск?', h('div', { class: 'form' },
-    h('p', {}, 'Дані лишаються і тут, і на Диску — просто перестануть синхронізуватись.'),
+    h('p', {}, 'Копія на Диску лишиться, просто перестане оновлюватись. Вхід у Google в інших застосунках не чіпаємо.'),
     h('div', { class: 'btn-grid' },
       h('button', { type: 'button', class: 'btn danger', onClick: () => { closeSheet(); Sync.disconnect(); render(); } }, 'Відключити'),
       h('button', { type: 'button', class: 'btn', onClick: closeSheet }, 'Залишити'))));
   return h('section', { class: 'card set-card' },
-    h('h2', {}, 'Google Диск'),
-    h('p', { class: 'muted small' }, on
-      ? (sync.error ? `Помилка: ${sync.error}` : last ? `Синхронізовано ${when}` : 'Ще не синхронізовано')
-      : 'Дані спільні для всіх твоїх телефонів: файл marnotrat-sync.json на твоєму Диску. Застосунок бачить лише свої файли.'),
+    h('h2', {}, Bot.botConfig() ? 'Google Диск · щоденна копія' : 'Google Диск · синхронізація'),
+    on ? h('p', { class: sync.error ? 'small error-text' : 'muted small' }, sync.error ? `Помилка: ${sync.error}` : last ? `Остання копія: ${when}` : 'Копії ще не було') : null,
+    h('p', { class: 'muted small' }, 'Копія — файл marnotrat-sync.json на твоєму Google Диску; там же адреса сервера й ключ доступу для інших пристроїв. Застосунок бачить лише свої файли.'),
     on
       ? h('div', { class: 'btn-grid' },
-        h('button', { type: 'button', class: 'btn primary', onClick: () => runSync({ loud: true }) }, icon('refresh'), 'Синхронізувати'),
+        h('button', { type: 'button', class: 'btn primary', onClick: () => runSync({ loud: true }) }, icon('check'), 'Зберегти зараз'),
+        h('button', { type: 'button', class: 'btn', onClick: restore }, icon('undo'), 'Відновити з Диска'),
         h('button', { type: 'button', class: 'btn', onClick: off }, icon('close'), 'Відключити'))
       : h('button', { type: 'button', class: 'btn primary', onClick: connect }, icon('refresh'), 'Підключити Google Диск'));
-}
-
-function demoCard() {
-  const add = async () => {
-    const changes = demoChanges(state.coins, uid);
-    if (!changes) { toast('Потрібні хоча б один дохід, рахунок у гривнях і витрата'); return; }
-    await save(changes, { redraw: false });
-    toast(`Додано ${changes.ops.put.length} демо-операцій`);
-    go('main');
-  };
-  const remove = async () => {
-    const changes = demoRemoval(state);
-    if (!changes) return;
-    await save(changes);
-    toast('Демо прибрано');
-  };
-  const has = hasDemo(state);
-  return h('section', { class: 'card set-card' },
-    h('h2', {}, 'Демо-дані'),
-    h('p', { class: 'muted small' }, has
-      ? 'Демо зараз у застосунку. «Прибрати» видалить лише демо-операції й ціль «Відпустка» — твоє лишиться.'
-      : 'Три місяці вигаданих операцій, ціль і бюджети — щоб подивитись, як усе виглядає з даними.'),
-    has
-      ? h('button', { type: 'button', class: 'btn danger', onClick: remove }, icon('close'), 'Прибрати демо')
-      : h('button', { type: 'button', class: 'btn', onClick: add }, icon('plus'), 'Додати демо-дані'));
 }
 
 const backupData = () => ({ app: 'marnotrat', version: self.APP_VERSION, exported: new Date().toISOString(), ...state });
@@ -1963,8 +2333,13 @@ async function importBackup(f) {
   if (!f) return;
   let data;
   try { data = JSON.parse(await f.text()); } catch { toast('Файл не читається як JSON'); return; }
+  importData(data, 'Відновити з копії?');
+}
+
+/** Копія (з файлу чи з Диска): «Додати до наявних» або «Замінити все». */
+function importData(data, title) {
   if (data?.app !== 'marnotrat' || !Array.isArray(data.coins) || !Array.isArray(data.ops)) { toast('Це не копія Марнотрата'); return; }
-  sheet('Відновити з копії?', h('div', { class: 'form' },
+  sheet(title, h('div', { class: 'form' },
     h('p', {}, `Монет: ${data.coins.length}, операцій: ${data.ops.length}.`),
     h('p', { class: 'muted' }, '«Додати» — монети з тією ж назвою беруться наявні, яких нема — створюються, операції додаються до твоїх. «Замінити все» — поточні дані на цьому телефоні буде стерто.'),
     h('div', { class: 'btn-grid' },
@@ -1980,6 +2355,8 @@ async function importBackup(f) {
           closeSheet();
           await replaceAll(data);
           Object.assign(state, await loadAll());
+          cloudCur.reset();
+          scheduleCloud(0);
           toast('Відновлено');
           render();
         },
@@ -2596,10 +2973,14 @@ function openMenu() {
     return h('button', { type: 'button', class: `menu-item${here === key ? ' on' : ''}`, onClick: () => pick(key) },
       icon(ico), h('span', { class: 'menu-label' }, label), b ? h('span', { class: `menu-badge ${b[1]}` }, String(b[0])) : null);
   };
+  // Нагадування — як пункти меню: тап веде туди, де з ним розібратись
+  const remind = alerts().map((a) => h('button', { type: 'button', class: `plan-hint ${a.cls}`, onClick: () => pick(a.to) },
+    icon(a.ico), h('span', { class: 'menu-label' }, a.text), icon('next')));
   const close = sheet('Меню', h('nav', { class: 'menu' },
     h('div', { class: 'menu-head' },
       h('img', { class: 'menu-logo', src: './icons/icon-192.png', alt: '', width: 44, height: 44 }),
       h('span', {}, h('b', {}, 'Марнотрат'), h('span', {}, `на рахунках ${M.money(Math.round(totalBalance()))}`))),
+    remind.length ? h('div', { class: 'menu-group remind' }, h('p', { class: 'menu-cap' }, 'Нагадування'), remind) : null,
     MENU.map(([title, items]) => h('div', { class: 'menu-group' }, h('p', { class: 'menu-cap' }, title), items.map(item))),
     h('div', { class: 'menu-foot' }, item(['settings', 'gear', 'Налаштування']), h('p', { class: 'menu-ver' }, `версія ${self.APP_VERSION}`))),
   { cls: 'drawer', bare: true });
@@ -2631,18 +3012,25 @@ const VIEWS = {
   reconcile: { title: 'Звірка залишків', render: viewReconcile },
 };
 
+function menuButton() {
+  const n = editing() ? 0 : alerts().length;
+  return h('button', { type: 'button', class: 'icon-btn', 'aria-label': n ? `Меню, нагадувань: ${n}` : 'Меню', onClick: openMenu },
+    icon('menu'), n ? h('span', { class: 'menu-count' }, String(n)) : null);
+}
+
 function topbar() {
   const bar = $('topbar');
   if (view === 'main') {
     const open = recall('income-open') === '1';
     bar.className = 'topbar';
-    bar.replaceChildren(
-      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Меню', onClick: openMenu }, icon('menu')),
+    bar.replaceChildren(...[
+      menuButton(),
       headStats(),
+      syncChip(),
       h('button', {
         type: 'button', class: `icon-btn${open ? ' chev-up' : ''}`, 'aria-label': open ? 'Сховати доходи' : 'Показати доходи', 'aria-expanded': String(open),
         onClick: () => { remember('income-open', open ? '0' : '1'); render(); },
-      }, icon('chevron')));
+      }, icon('chevron'))].filter(Boolean));
     return;
   }
   if (view === 'edit') {
@@ -2658,6 +3046,7 @@ function topbar() {
   bar.replaceChildren(...[
     h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Назад', onClick: () => (history.length > 1 ? history.back() : go('main')) }, icon('back')),
     h('h1', {}, typeof title === 'function' ? title() : title),
+    syncChip(),
     view === 'report' ? h('button', {
       type: 'button', class: `icon-btn${filterOn() ? ' has-dot' : ''}`, 'aria-label': filterOn() ? 'Фільтри (увімкнено)' : 'Фільтри', onClick: openReportFilter,
     }, icon('filter')) : null,
@@ -2680,6 +3069,7 @@ function fitNames() {
 }
 
 function render() {
+  shareMoney();
   topbar();
   // Ряд рахунків прилипає під шапку — їй висота з вирізом екрана, тож міряємо, а не вгадуємо
   document.documentElement.style.setProperty('--topbar-h', `${$('topbar').offsetHeight}px`);
@@ -2746,6 +3136,10 @@ async function init() {
     if (!state.meta.some((m) => m.id === 'seeded')) {
       await save({ coins: { put: M.seedCoins(uid) }, meta: { put: [{ id: 'seeded', at: M.ymd() }] } }, { redraw: false });
     }
+    // Демо-дані з колишньої кнопки «Демо-дані» — геть (операції й ціль з позначкою demo)
+    const demoOps = state.ops.filter((o) => o.demo).map((o) => o.id);
+    const demoCoins = state.coins.filter((c) => c.demo).map((c) => c.id);
+    if (demoOps.length || demoCoins.length) await save({ ops: { del: demoOps }, coins: { del: demoCoins } }, { redraw: false });
   } catch (err) {
     $('view').replaceChildren(h('p', { class: 'error' }, `Не вдалося відкрити сховище браузера: ${err.message}`));
     return;
@@ -2753,9 +3147,28 @@ async function init() {
   window.addEventListener('hashchange', route);
   // Синхронізація: при відкритті й поверненні в застосунок; ключ Google оновлюємо з першого натискання
   if (Sync.syncOn()) { Sync.preload(); runSync(); }
+  runCloud();
+  Bot.scheduleBot(botPayload, 1500);
+  // Адреса й ключ бота прийшли з Диска (спільний bot-settings.json) — одразу підсумки, у налаштуваннях — новий стан
+  // Ключ вставили в іншому застосунку на цьому телефоні
+  addEventListener('storage', (e) => {
+    if (e.key !== 'vitaliylobko:bot') return;
+    scheduleCloud(0);
+    Bot.scheduleBot(botPayload, 0);
+    render();
+  });
+  window.addEventListener('bot-config', () => {
+    scheduleCloud(0);
+    Bot.scheduleBot(botPayload, 0);
+    if (view === 'settings') render();
+  });
   showWhatsNew();
   document.addEventListener('pointerup', () => { if (Sync.syncOn() && !Sync.tokenValid()) runSync({ gesture: true }); }, true);
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') runSync(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') { runSync(); scheduleCloud(300); Bot.scheduleBot(botPayload, 1500); }
+  });
+  addEventListener('online', () => { refreshChip(); scheduleCloud(500); });
+  addEventListener('offline', refreshChip);
   addEventListener('resize', () => { if (onMain()) fitNames(); });
   // Тінь під закріпленим рядом рахунків — лише коли під ним уже гортаються витрати
   addEventListener('scroll', () => {
