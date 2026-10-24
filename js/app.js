@@ -3,6 +3,7 @@ import { loadAll, write, uid, replaceAll, putFile, getFile, dropFilesExcept } fr
 import { slAvailable, readJournal, addRecord, patchRecord, removeRecord } from './journal.js';
 import * as M from './model.js';
 import * as Sync from './sync.js';
+import * as Bot from './bot.js';
 import { demoChanges, demoRemoval, hasDemo } from './demo.js';
 import { CHANGES, changesSince } from './changes.js';
 import { $, h, icon, hasIcon, toast, sheet, closeSheet, chips, swipeStep, vibrate } from './ui.js';
@@ -87,6 +88,75 @@ async function save(changes, { redraw = true } = {}) {
   }
   if (redraw) render();
   scheduleSync();
+  Bot.scheduleBot(botPayload);
+}
+
+// ---------- підсумки в Telegram (бот Хобі-плану) ----------
+
+// Скільки днів віддаємо боту: тиждень, минулий тиждень для порівняння й запас на день без зв'язку
+const BOT_DAYS = 35;
+
+/**
+ * Що бачить бот: за кожен день від from — витрати й доходи в гривнях і витрати за категоріями (найбільші спершу),
+ * плюс бюджет поточного місяця обліку, як «Лишилось» у шапці. Демо-операції не їдуть.
+ */
+function botPayload() {
+  const from = M.addDays(M.ymd(), -(BOT_DAYS - 1));
+  const days = new Map();
+  for (const op of state.ops) {
+    if (op.date < from || op.demo) continue;
+    const t = opType(op);
+    if (t === 'transfer') continue;
+    let d = days.get(op.date);
+    if (!d) days.set(op.date, (d = { date: op.date, expense: 0, income: 0, cats: new Map() }));
+    if (t === 'income') { d.income += toUah(op.amount, coinOr(op.from).currency); continue; }
+    const c = coinOr(op.to);
+    const v = toUah(amountIn(op), c.currency);
+    d.expense += v;
+    d.cats.set(c.name, (d.cats.get(c.name) ?? 0) + v);
+  }
+  const round = (v) => M.round2(v);
+  const plan = planTotal();
+  return {
+    from,
+    days: [...days.values()].map((d) => ({
+      date: d.date, expense: round(d.expense), income: round(d.income),
+      cats: [...d.cats].sort((a, b) => b[1] - a[1]).map(([name, v]) => [name, round(v)]),
+    })),
+    budget: plan ? { plan: round(plan), left: round(plan - totals(currentPeriod()).expense) } : null,
+  };
+}
+
+/** Налаштування: бот підключено в Хобі-плані — вмикач і коли востаннє надіслано; ні — як підключити. */
+function botCard() {
+  const cfg = Bot.botConfig();
+  if (!cfg) {
+    return h('section', { class: 'card set-card' },
+      h('h2', {}, 'Підсумки в Telegram'),
+      h('p', { class: 'muted small' },
+        'Бот Хобі-плану ввечері пише один підсумок дня — справи, вагу й гроші, а в неділю — тиждень. ',
+        'Підключи його в ', h('a', { href: '../hobby-planner/' }, 'Хобі-плані'),
+        ' (Налаштування → Telegram-бот) — Марнотрат візьме його сам.'));
+  }
+  const on = Bot.botOn();
+  const last = Bot.lastSent();
+  const when = last ? new Date(last).toLocaleString('uk-UA', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }) : '';
+  const send = async () => {
+    try { await Bot.pushBot(botPayload, { force: true }); toast('Надіслано боту'); } catch (err) { toast(Bot.lastError() || err.message); }
+    render();
+  };
+  return h('section', { class: 'card set-card' },
+    h('h2', {}, 'Підсумки в Telegram'),
+    chips([['on', 'Увімкнено'], ['off', 'Вимкнено']], on ? 'on' : 'off', (v) => {
+      Bot.setBotOn(v === 'on');
+      if (v === 'on') Bot.scheduleBot(botPayload, 0);
+      render();
+    }),
+    h('p', { class: 'muted small' }, on
+      ? [Bot.lastError() ? `Помилка: ${Bot.lastError()}. ` : last ? `Надіслано ${when}. ` : 'Ще не надсилалось. ',
+        'Боту йдуть лише суми за дні й категорії та бюджет місяця — без операцій і коментарів. Час підсумку — у Хобі-плані.']
+      : 'Гроші в вечірній підсумок бота не потраплять.'),
+    on ? h('button', { type: 'button', class: 'btn', onClick: send }, icon('refresh'), 'Надіслати зараз') : null);
 }
 
 // ---------- синхронізація з Google Диском ----------
@@ -1805,6 +1875,7 @@ function viewSettings() {
         },
       }, icon('refresh'), 'Курс НБУ на сьогодні')),
     syncCard(),
+    botCard(),
     demoCard(),
     h('section', { class: 'card set-card' },
       h('h2', {}, 'Резервна копія'),
@@ -2858,9 +2929,12 @@ async function init() {
   window.addEventListener('hashchange', route);
   // Синхронізація: при відкритті й поверненні в застосунок; ключ Google оновлюємо з першого натискання
   if (Sync.syncOn()) { Sync.preload(); runSync(); }
+  Bot.scheduleBot(botPayload, 1500);
   showWhatsNew();
   document.addEventListener('pointerup', () => { if (Sync.syncOn() && !Sync.tokenValid()) runSync({ gesture: true }); }, true);
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') runSync(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') { runSync(); Bot.scheduleBot(botPayload, 1500); }
+  });
   addEventListener('resize', () => { if (onMain()) fitNames(); });
   // Тінь під закріпленим рядом рахунків — лише коли під ним уже гортаються витрати
   addEventListener('scroll', () => {
