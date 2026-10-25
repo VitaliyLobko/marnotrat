@@ -620,7 +620,8 @@ function coinEl(c, ym) {
   const face = h('div', { class: 'coin-face', style: { '--fill': String(fill) } },
     c.kind === 'expense' ? h('span', { class: 'coin-fill' }) : null,
     icon(hasIcon(c.icon) ? c.icon : 'coins', 'ico coin-ico'));
-  const el = h('div', { class: `coin k-${c.kind}${st ? ` st-${st}` : ''}`, 'data-id': c.id, 'data-kind': c.kind },
+  const zero = Math.abs(sum) < 0.005 && c.kind !== 'debt' ? ' zero' : '';
+  const el = h('div', { class: `coin k-${c.kind}${st ? ` st-${st}` : ''}${zero}`, 'data-id': c.id, 'data-kind': c.kind },
     h('div', { class: 'coin-name' }, c.name),
     face,
     sumEl(c, sum),
@@ -714,8 +715,21 @@ function viewMain() {
     pager('account', [...state.coins.filter((c) => (c.kind === 'account' || c.kind === 'debt') && !c.archived)
       .sort((a, b) => a.order - b.order).map((c) => coinEl(c, ym)), addCoinEl('account')], 4, 'coin-row accounts'),
     pager('expense', [...grid.map((c) => coinEl(c, ym)), addCoinEl('expense')], 16, 'expenses'),
-    state.ops.length ? null : h('p', { class: 'muted small main-hint' },
+    state.ops.length ? todayStrip() : h('p', { class: 'muted small main-hint' },
       'Тягни монету пальцем: дохід — на рахунок, рахунок — на витрату чи інший рахунок. Тап — історія монети, довге натискання — змінити.'));
+}
+
+const opsWord = (n) => (n % 10 === 1 && n % 100 !== 11 ? 'операція'
+  : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? 'операції' : 'операцій');
+
+/** Підсумок сьогодні під монетами — тап веде у «Звіт по днях» на сьогодні. */
+function todayStrip() {
+  if (editing()) return null;
+  const today = M.ymd();
+  const n = state.ops.filter((op) => op.date === today).length;
+  const { expense } = totals(today);
+  return h('button', { type: 'button', class: 'today-strip', onClick: () => { dayDate = today; go('days'); } },
+    icon('daily'), n ? ['Сьогодні: ', h('b', {}, expense ? `− ${M.money(expense)}` : M.money(0)), ` · ${n} ${opsWord(n)}`] : 'Сьогодні ще без операцій');
 }
 
 // ---------- перетягування монет ----------
@@ -1358,10 +1372,14 @@ function opRow(op) {
     op.warranty && !op.plan ? `гарантія до ${dmy(op.warranty)}` : '', op.photos?.length && !op.plan ? `фото: ${op.photos.length}` : '',
     op.plan ? '' : slNote(op)].filter(Boolean);
   const second = op.amountTo != null && t === 'transfer' ? ` → ${M.money(op.amountTo, dst.currency)}` : '';
+  // У стрічці однієї монети її назва в кожному рядку — шум: лишаємо лише другий кінець
+  const other = feedCoin === op.to ? src : feedCoin === op.from ? dst : null;
+  const ends = h('span', { class: 'op-ends' }, other ? h('span', { class: 'op-to' }, other.name)
+    : [h('span', { class: 'op-from' }, src.name), h('span', { class: 'op-to' }, dst.name)]);
   // Запланований повтор: тап — провести з правкою суми, свайп вправо — провести як є, вліво — пропустити чи зупинити
   if (op.plan) {
     const row = h('button', { type: 'button', class: `op-row plan${op.date <= M.ymd() ? ' due' : ''}`, onClick: () => openAmount({ from: op.from, to: op.to, preset: op }) },
-      h('span', { class: 'op-ends' }, h('span', { class: 'op-from' }, src.name), h('span', { class: 'op-to' }, dst.name)),
+      ends,
       h('span', { class: 'op-right' },
         h('span', { class: `op-sum ${t}` }, M.money(v, cur, { sign }) + second),
         note.map((x) => h('span', { class: 'op-note' }, x)),
@@ -1369,7 +1387,7 @@ function opRow(op) {
     return swipeRow(row, { onLeft: () => planMenu(op), onRight: () => confirmPlan(op), labels: ['Провести', 'Пропустити'] });
   }
   const row = h('button', { type: 'button', class: 'op-row', onClick: () => openAmount({ from: op.from, to: op.to, op }) },
-    h('span', { class: 'op-ends' }, h('span', { class: 'op-from' }, src.name), h('span', { class: 'op-to' }, dst.name)),
+    ends,
     h('span', { class: 'op-right' },
       h('span', { class: `op-sum ${t}` }, M.money(v, cur, { sign }) + second),
       note.map((x) => h('span', { class: 'op-note' }, x))));
@@ -1525,7 +1543,8 @@ const byNewest = (a, b) => cmp(b.date, a.date) || (b.created ?? b.updated ?? 0) 
  * дохід — плюс отримане, рахунок і ціль — прихід мінус розхід.
  */
 function coinDayFoot(c, dayOps) {
-  if (!c) return null;
+  // Одна операція за день — підсумок лише повторив би її суму
+  if (!c || dayOps.filter((op) => !op.plan).length < 2) return null;
   let v = 0;
   for (const op of dayOps) {
     if (op.plan) continue;
@@ -1695,8 +1714,10 @@ function reportParts(kind) {
   const list = [...sums]
     .map(([k, v]) => ({ c: reportTags ? { id: `tag:${k}`, name: k ? `#${k}` : 'Без тегу', tag: k } : coinOr(k), v }))
     .filter((x) => x.v > 0).sort((a, b) => b.v - a.v);
-  const top = list.slice(0, SLOTS).map((x, i) => ({ ...x, color: `var(--s${i + 1})` }));
-  const rest = list.slice(SLOTS);
+  // «Інше» з однієї частки нічого не ховає — тоді вона йде восьмою своїм кольором
+  const slots = list.length === SLOTS + 1 ? SLOTS + 1 : SLOTS;
+  const top = list.slice(0, slots).map((x, i) => ({ ...x, color: `var(--s${i + 1})` }));
+  const rest = list.slice(slots);
   if (rest.length) top.push({ c: { id: 'other', name: `Інше (${rest.length})` }, v: rest.reduce((s, x) => s + x.v, 0), color: 'var(--s-other)', rest });
   return top;
 }
@@ -1783,7 +1804,7 @@ function viewReport() {
     nav,
     total ? donut(parts, total, picked
       ? [h('span', {}, picked.c.name), h('b', {}, M.money(picked.v)), h('span', {}, `${Math.round((picked.v / total) * 100)}%`)]
-      : [h('span', {}, custom ? shortRange() : periodTitle(reportMonth)), h('b', {}, M.money(real))])
+      : [h('span', {}, reportKind === 'expense' ? 'витрати' : 'доходи'), h('b', {}, M.money(real))])
       : h('p', { class: 'empty' }, custom ? `За цей період ${what} немає` : `Цього місяця ${what} немає`),
     total ? h('div', { class: 'card' }, parts.map((p) => h('button', {
       type: 'button', class: `rep-row${reportPick === p.c.id ? ' on' : ''}`,
@@ -1869,9 +1890,10 @@ function viewDays() {
     list.length ? h('div', { class: 'card' }, list.map((r) => h('div', { class: 'kv' },
       h('span', {}, r.name), h('span', { class: r.v > 0 ? 'plus' : 'minus' }, signed(r.v)))))
       : h('p', { class: 'empty' }, 'Цього дня доходів і витрат немає'),
-    h('div', { class: 'card' },
+    // Підсумок має сенс, коли були і дохід, і витрата: інакше він повторює велику суму вгорі
+    income && expense ? h('div', { class: 'card' },
       h('div', { class: 'kv' }, h('b', {}, 'Дохід'), h('span', { class: 'plus' }, signed(income))),
-      h('div', { class: 'kv' }, h('b', {}, 'Витрата'), h('span', { class: 'minus' }, signed(-expense)))));
+      h('div', { class: 'kv' }, h('b', {}, 'Витрата'), h('span', { class: 'minus' }, signed(-expense)))) : null);
   return swipeStep(body, step);
 }
 
@@ -2197,7 +2219,6 @@ function aboutPanel() {
     h('div', { class: 'about-head' },
       h('img', { class: 'about-avatar', src: './icons/author.jpg', alt: '', width: 64, height: 64, loading: 'lazy' }),
       h('div', {},
-        h('h2', {}, 'Про застосунок'),
         h('p', { class: 'muted small' }, 'Марнотрат — облік витрат монетами: перетягнув гроші з рахунку на витрату — записано. Працює без інтернету.'),
         h('p', { class: 'small about-author' }, 'Автор — ', link('https://github.com/VitaliyLobko', 'Віталій Лобко')))),
     more('Де мої дані', h('div', { class: 'muted small' },
@@ -2208,7 +2229,8 @@ function aboutPanel() {
       h('li', {}, 'Встанови застосунок: Android — Chrome → ⋮ → «Встановити застосунок»; iPhone — Safari → «Поділитися» → «На екран „Додому“».'),
       h('li', {}, 'Довге натискання на монету — режим «Редагування»: назва, іконка, бюджет, переставити, прибрати. «+» у ряду — нова монета.'),
       h('li', {}, 'Дохід → рахунок, рахунок → витрата чи ціль, рахунок → рахунок: тягни монету пальцем на іншу й введи суму.'),
-      h('li', {}, 'Тап по монеті — її операції. У стрічці свайп вліво — видалити, вправо — змінити.'))),
+      h('li', {}, 'Тап по монеті — її операції. У стрічці свайп вліво — видалити, вправо — змінити.'),
+      h('li', {}, 'Заливка монети витрати знизу — скільки бюджету вже витрачено, сіре згори — що лишилось. Зелена — в темпі, помаранчева — витрачаєш швидше, ніж іде місяць, червона — понад бюджет. Зелений обідок без заливки — бюджету немає.'))),
     h('p', { class: 'muted small' },
       link('https://github.com/VitaliyLobko/marnotrat/issues/new', 'Повідомити про помилку'), ' · ',
       link('https://github.com/VitaliyLobko/marnotrat', 'Вихідний код')));
@@ -2222,7 +2244,7 @@ function aboutCard() {
     h('h2', {}, 'Марнотрат'),
     h('p', { class: 'muted small' }, `Версія ${self.APP_VERSION ?? '?'} · збірка ${self.APP_BUILD ?? '?'}`),
     status,
-    h('div', { class: 'btn-grid' },
+    h('div', { class: 'btn-grid stack' },
       upd.worker
         ? h('button', { type: 'button', class: 'btn primary', onClick: () => upd.worker.postMessage('skipWaiting') }, icon('refresh'), 'Оновити')
         : h('button', { type: 'button', class: 'btn', onClick: () => checkUpdate(status) }, icon('refresh'), 'Перевірити оновлення'),
