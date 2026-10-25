@@ -19,6 +19,7 @@ const ASSETS = [
   './js/cloud.js',
   './js/journal.js',
   './js/changes.js',
+  './js/csv.js',
   './js/ui.js',
   './js/icons.js',
   './js/icons-lucide.js',
