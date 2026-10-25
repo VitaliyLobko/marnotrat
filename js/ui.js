@@ -24,11 +24,18 @@ export function h(tag, attrs = {}, ...children) {
   return el;
 }
 
-/** Іконка з власного набору чи Lucide: розмітка SVG своя, не з даних, тому innerHTML тут безпечний. */
+const iconTpl = new Map();
+
+/** Іконка з власного набору чи Lucide: розмітка SVG своя, не з даних, тому innerHTML тут безпечний; розбираємо раз, далі — копія. */
 export function icon(name, cls = 'ico') {
-  const span = h('span', { class: cls, 'aria-hidden': 'true' });
-  span.innerHTML = `<svg viewBox="0 0 24 24">${ICONS[name] ?? LUCIDE[name] ?? ''}</svg>`;
-  return span;
+  const key = `${cls} ${name}`;
+  let tpl = iconTpl.get(key);
+  if (!tpl) {
+    tpl = h('span', { class: cls, 'aria-hidden': 'true' });
+    tpl.innerHTML = `<svg viewBox="0 0 24 24">${ICONS[name] ?? LUCIDE[name] ?? ''}</svg>`;
+    iconTpl.set(key, tpl);
+  }
+  return tpl.cloneNode(true);
 }
 
 export const hasIcon = (name) => Boolean(ICONS[name] ?? LUCIDE[name]);
