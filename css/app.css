@@ -9,36 +9,39 @@
   --line: #e2e2e2;
   --text: #222426;
   --text-2: #4a4d52;
-  --muted: #8b8f95;
-  /* шапка звітів і стрічки, кнопки дат */
-  --brand: #11c98c;
+  /* підписи й суми текстом — не світліші за 4.5:1 до тла, інакше на сонці не читаються */
+  --muted: #6f737a;
+  /* шапка звітів і стрічки, кнопки дат; білий напис на ній — від 3:1 (великий шрифт) */
+  --brand: #0b9466;
   --brand-ink: #ffffff;
+  /* бренд як колір тексту: посилання, назви груп */
+  --brand-text: #08805a;
   /* монети: доходи, рахунки, порожня витрата */
   --inc: #23b5e8;
-  --inc-ink: #1d9fcf;
+  --inc-ink: #1679a3;
   --acc: #ffcc00;
-  --acc-ink: #e9a400;
+  --acc-ink: #946800;
   --coin-empty: #c3c5c9;
   --goal: #22c3d6;
-  --goal-ink: #0ea5b8;
+  --goal-ink: #0a7a88;
   --coin-ico: #ffffff;
   /* статус витрати: у бюджеті / близько / перевитрата */
   --ok: #10cf8e;
-  --ok-ink: #0faa77;
+  --ok-ink: #08805a;
   --warn: #ff8a00;
-  --warn-ink: #f07f00;
+  --warn-ink: #b85800;
   --over: #e53935;
-  --over-ink: #df3431;
+  --over-ink: #d32f2f;
   /* суми в стрічці */
-  --plus: #0faa77;
-  --minus: #df3431;
+  --plus: #08805a;
+  --minus: #d32f2f;
   /* клавіатура суми */
   --pad: #616366;
   --pad-ops: #7a7c80;
   --pad-ink: #ffffff;
   /* кольори кільця звіту — по порядку частки */
   --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
-  --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s-other: #b5b8bd;
+  --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #8a5a2b; --s-other: #b5b8bd;
   --radius: 14px;
   color-scheme: light;
 }
@@ -54,14 +57,15 @@
   --muted: #959ca5;
   --brand: #0e9e6f;
   --brand-ink: #f2fffa;
+  --brand-text: #3ad39c;
   --inc: #1a7699;
   --inc-ink: #4cc2ec;
   --acc: #c69a00;
   --acc-ink: #dcb442;
-  --coin-empty: #3a3f47;
+  --coin-empty: #6e737b;
   --goal: #167f8c;
   --goal-ink: #4fd3e3;
-  --coin-ico: #e2e5e9;
+  --coin-ico: #121417;
   --ok: #138a62;
   --ok-ink: #3ad39c;
   --warn: #cc6e00;
@@ -74,7 +78,7 @@
   --pad-ops: #30353c;
   --pad-ink: #eef1f4;
   --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
-  --s5: #d55181; --s6: #2f9a2f; --s7: #9085e9; --s-other: #5b616a;
+  --s5: #d55181; --s6: #2f9a2f; --s7: #9085e9; --s8: #b5824f; --s-other: #5b616a;
   color-scheme: dark;
 }
 
@@ -96,7 +100,7 @@ body {
 body.layer-open { overflow: hidden; }
 
 button { font: inherit; color: inherit; cursor: pointer; }
-a { color: var(--brand); }
+a { color: var(--brand-text); }
 :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 
 .ico { display: inline-flex; flex: none; }
@@ -189,7 +193,7 @@ a { color: var(--brand); }
 .coin-face .coin-ico { position: relative; z-index: 1; }
 /* іконка — близько половини монети, тонкою лінією */
 .coin-face .coin-ico { width: 50%; }
-.coin-face .coin-ico svg { width: 100%; height: auto; stroke-width: 1.2; }
+.coin-face .coin-ico svg { width: 100%; height: auto; stroke-width: 1.6; }
 .coin-fill { position: absolute; left: 0; right: 0; bottom: 0; height: calc(var(--fill, 0) * 100%); background: var(--ok); }
 .k-income .coin-face { background: var(--inc); }
 .k-account .coin-face { background: var(--acc); }
@@ -213,6 +217,8 @@ a { color: var(--brand); }
 .k-expense .coin-sum { color: var(--ok-ink); }
 .k-expense.st-warn .coin-sum { color: var(--warn-ink); }
 .k-expense.st-over .coin-sum { color: var(--over-ink); }
+/* нуль — не «все добре», а просто нічого: без кольору */
+.coin.zero .coin-sum { color: var(--muted); }
 .coin-sub { margin-top: -4px; font-size: 11px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .coin-add { border: 0; background: none; font: inherit; }
 .coin-add .coin-face { background: none; border: 2px dashed var(--line); color: var(--muted); touch-action: auto; }
@@ -296,7 +302,7 @@ a { color: var(--brand); }
   padding: 12px 0 10px; border: 0; border-bottom: 3px solid transparent; background: none;
   color: color-mix(in srgb, var(--brand-ink) 70%, transparent); font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
 }
-.tabs-bar button.on { color: var(--brand-ink); border-bottom-color: #e6f55a; }
+.tabs-bar button.on { color: var(--brand-ink); border-bottom-color: var(--brand-ink); }
 .period { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 4px; touch-action: pan-y; }
 .period h2 { margin: 0; font-size: 17px; font-weight: 500; text-align: center; flex: 1; }
 .period .icon-btn { color: var(--muted); }
@@ -310,7 +316,7 @@ a { color: var(--brand); }
 .donut-center span { color: var(--muted); font-size: 15px; max-width: 60%; }
 .donut-center b { font-size: 26px; font-weight: 400; font-variant-numeric: tabular-nums; }
 .rep-row {
-  display: grid; grid-template-columns: 12px minmax(0, 1fr) 48px auto; align-items: center; gap: 10px;
+  display: grid; grid-template-columns: 12px minmax(0, 1fr) auto 48px auto; align-items: center; gap: 10px;
   width: 100%; padding: 12px 16px; border: 0; border-bottom: 1px solid var(--line); background: none; text-align: left;
 }
 .rep-row:last-child { border-bottom: 0; }
@@ -319,6 +325,10 @@ a { color: var(--brand); }
 .rep-pct { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
 .rep-sum { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .rep-row.on { background: var(--surface-2); }
+/* ↑ / ↓ проти середнього за попередні місяці */
+.rep-delta { font-size: 13px; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.rep-delta.up { color: var(--over-ink); }
+.rep-delta.down { color: var(--ok-ink); }
 .big-total { margin: 4px 0 12px; text-align: center; font-size: 40px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .kv { display: flex; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
 .kv:last-child { border-bottom: 0; }
@@ -360,7 +370,7 @@ a { color: var(--brand); }
 }
 .menu-item:hover { background: var(--surface-2); }
 .menu-item.on { background: color-mix(in srgb, var(--brand) 14%, transparent); color: var(--text); font-weight: 600; }
-.menu-item .ico { color: var(--brand); }
+.menu-item .ico { color: var(--brand-text); }
 .menu-item .ico svg { width: 24px; height: 24px; stroke-width: 1.6; }
 .menu-label { flex: 1; }
 .menu-badge { min-width: 24px; padding: 2px 8px; border-radius: 12px; background: var(--surface-2); color: var(--text-2); font-size: 13px; font-weight: 600; text-align: center; font-variant-numeric: tabular-nums; }
@@ -395,7 +405,7 @@ a { color: var(--brand); }
 /* ---------- екран суми ---------- */
 
 .amt-head { display: flex; align-items: center; gap: 4px; min-height: 60px; padding: env(safe-area-inset-top) 6px 0; border-bottom: 1px solid var(--line); box-shadow: 0 1px 4px rgb(0 0 0 / .08); }
-.amt-route { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 6px; color: var(--muted); font-size: 18px; }
+.amt-route { flex: 1; min-width: 0; display: grid; grid-template-columns: minmax(0, max-content) auto minmax(0, max-content); justify-content: center; align-items: center; gap: 6px; color: var(--muted); font-size: 17px; }
 .amt-end { display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; }
 .amt-end > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .amt-head .mini-coin { width: 30px; }
@@ -407,6 +417,26 @@ a { color: var(--brand); }
 .amt-cur { font-size: 18px; color: var(--text-2); }
 .amt-res { text-align: right; color: var(--muted); font-size: 18px; min-height: 1.4em; }
 .amt-note { text-align: right; color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
+.amt-budget { text-align: right; color: var(--text-2); font-size: 14px; }
+.amt-budget.over { color: var(--over-ink); font-weight: 600; }
+.amt-impact.goal { color: var(--goal-ink); }
+.amt-impact.warn { color: var(--warn-ink); }
+/* велика витрата: наслідки списком і кнопка, що заповнюється, поки її тримаєш */
+.big-title { margin: 0; font-size: 17px; font-weight: 600; }
+.big-list { margin: 0; padding-left: 20px; display: grid; gap: 4px; color: var(--text-2); font-size: 15px; }
+.big-list .over { color: var(--over-ink); font-weight: 600; }
+.big-list .warn { color: var(--warn-ink); }
+.big-list .goal { color: var(--goal-ink); }
+.hold-btn { position: relative; overflow: hidden; min-height: 52px; user-select: none; -webkit-user-select: none; touch-action: none; }
+.hold-fill { position: absolute; inset: 0; background: rgb(255 255 255 / .28); transform: scaleX(0); transform-origin: left; }
+.hold-btn.holding .hold-fill { transform: scaleX(1); transition: transform 1s linear; }
+.hold-text { position: relative; }
+.free-day { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; }
+.free-day > .ico svg { width: 24px; height: 24px; color: var(--warn-ink); }
+.free-day p { margin: 2px 0 0; }
+.amt-quick { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.amt-quick .chip { min-height: 36px; padding: 4px 12px; font-size: 14px; }
+.chip.advice { justify-self: start; align-self: flex-start; color: var(--brand-text); font-size: 14px; }
 .amt-tags { display: flex; align-items: center; gap: 4px; min-height: 52px; padding: 0 6px 0 12px; background: var(--surface-2); }
 .amt-tags-list { flex: 1; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
 .amt-tag { flex: none; padding: 8px 10px; border: 0; border-radius: 999px; background: none; color: var(--muted); font-size: 18px; }
@@ -423,6 +453,8 @@ a { color: var(--brand); }
 .dates { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--brand); color: var(--brand-ink); padding-bottom: env(safe-area-inset-bottom); }
 .dates button { min-height: 56px; border: 0; background: none; color: inherit; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; display: grid; place-items: center; }
 .dates button:active { background: rgb(0 0 0 / .12); }
+.dates.with-del { grid-template-columns: 1fr 64px 64px; grid-auto-flow: row; }
+.dates .dates-act { border-left: 1px solid rgb(255 255 255 / .25); }
 .date-hidden { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .amt-panel { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; background: var(--surface); border-top: 1px solid var(--line); }
 
@@ -442,9 +474,13 @@ a { color: var(--brand); }
 .update button { border: 0; border-radius: 10px; padding: 8px 14px; background: rgb(0 0 0 / .18); color: inherit; font-weight: 700; }
 .set-card { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
 .set-card h2 { margin: 0; font-size: 17px; }
+/* відступи між рядками картки дає gap, власні поля абзаців їх лише роздували */
+.set-card > p { margin: 0; }
+.set-card > p:empty { display: none; }
+.btn-grid.stack { grid-template-columns: 1fr; }
 /* налаштування групами, як у Стрілецькому журналі: рамка з назвою на лінії, всередині — розділи через лінію */
 .settings-group { min-width: 0; margin: 22px 0 14px; padding: 2px 16px 4px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: 0 1px 3px rgb(0 0 0 / .08); }
-.settings-group > legend { padding: 0 8px; margin-left: -6px; border-radius: 6px; background: var(--surface); color: var(--brand); font-size: 13px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.settings-group > legend { padding: 0 8px; margin-left: -6px; border-radius: 6px; background: var(--surface); color: var(--brand-text); font-size: 13px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
 .settings-group > .set-card { padding: 14px 0; border-radius: 0; background: none; box-shadow: none; overflow: visible; }
 /* лінія між розділами — від кольору тексту: у темній темі var(--line) майже зливався з тлом */
 .settings-group > .set-card + .set-card { border-top: 1px solid color-mix(in srgb, var(--text) 20%, transparent); }
@@ -454,7 +490,9 @@ a { color: var(--brand); }
 .group-toggle { display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: none; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; cursor: pointer; }
 .group-toggle .ico { width: 14px; height: 14px; transition: transform .15s; }
 .settings-group.closed .group-toggle .ico { transform: rotate(-90deg); }
-.settings-group.closed { padding-bottom: 0; }
+/* згорнута група — лише заголовок над лінією, без порожньої рамки */
+.settings-group.closed { padding: 0 16px; border-width: 1px 0 0; border-radius: 0; background: none; box-shadow: none; }
+.settings-group.closed > legend { background: var(--bg); }
 .settings-group.closed > :not(legend) { display: none; }
 .rate-row { display: grid; grid-template-columns: 60px 1fr; align-items: center; gap: 10px; }
 .error { padding: 24px 16px; color: var(--over-ink); }
@@ -501,11 +539,11 @@ a { color: var(--brand); }
 .about-head { display: flex; align-items: center; gap: 12px; }
 .about-head h2 { margin: 0 0 2px; }
 .about-head p { margin: 2px 0; }
-.about-author a, .set-card a { color: var(--brand); font-weight: 600; text-decoration: none; }
+.about-author a, .set-card a { color: var(--brand-text); font-weight: 600; text-decoration: none; }
 .about-avatar { flex: none; width: 64px; height: 64px; border-radius: 50%; object-fit: cover;
   background: var(--surface-2); box-shadow: 0 0 0 1px var(--line); }
 .about-more { margin-top: 6px; border-top: 1px solid var(--line); }
-.about-more > summary { padding: 8px 0; color: var(--brand); font-size: 13px; font-weight: 700; cursor: pointer; list-style: none; }
+.about-more > summary { padding: 8px 0; color: var(--brand-text); font-size: 13px; font-weight: 700; cursor: pointer; list-style: none; }
 .about-more > summary::-webkit-details-marker { display: none; }
 .about-more > summary::after { content: ' ›'; }
 .about-more[open] > summary::after { content: ' ⌄'; }
@@ -529,7 +567,7 @@ button.amt-end.on { background: var(--surface-2); }
 
 /* фільтри звіту */
 .filter-form { gap: 0; }
-.filter-head { margin: 14px 0 4px; color: var(--brand); font-weight: 600; font-size: 15px; }
+.filter-head { margin: 14px 0 4px; color: var(--brand-text); font-weight: 600; font-size: 15px; }
 .check-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 4px 0; border-bottom: 1px solid var(--line); font-size: 16px; }
 .check-row input[type="checkbox"] { width: 22px; height: 22px; accent-color: var(--brand); }
 .check-row input[type="date"] { width: auto; max-width: 60%; }
@@ -574,7 +612,7 @@ details.icon-group > .icon-row { padding-bottom: 10px; }
 /* повтори: заплановані в стрічці — бліді; на головній — рядок «До проведення» */
 .op-row.plan { opacity: .55; }
 .op-row.plan.due { opacity: .75; }
-.plan-tag { color: var(--brand); font-weight: 600; }
+.plan-tag { color: var(--brand-text); font-weight: 600; }
 .pad-ops button.on { color: var(--brand); }
 .plan-hint {
   display: flex; align-items: center; gap: 8px; width: calc(100% - 24px); margin: 10px 12px 0; padding: 10px 14px;
@@ -734,3 +772,20 @@ details.icon-group > .icon-row { padding-bottom: 10px; }
 .budget-bar span { display: block; height: 100%; border-radius: 3px; background: var(--ok); }
 .budget-card.st-warn .budget-bar span { background: var(--warn); }
 .budget-card.st-over .budget-bar span { background: var(--over); }
+
+/* «Сьогодні» тонким рядком між рахунками й витратами; згорнутий, розгортається потягуванням униз */
+.today-wrap { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .25s ease-out; }
+.today-wrap.open { grid-template-rows: 1fr; }
+.today-wrap > .today-strip { overflow: hidden; min-height: 0; }
+.today-wrap:not(.open) > .today-strip { padding-block: 0; border-bottom-width: 0; margin-block: 0; }
+@media (prefers-reduced-motion: reduce) { .today-wrap { transition: none; } }
+.today-strip {
+  display: flex; align-items: center; justify-content: center; width: calc(100% - 32px); min-height: 36px; margin: 2px 16px 6px; padding: 6px 4px;
+  border: 0; border-bottom: 1px solid var(--line); background: none; color: var(--text-2); font-size: 13px;
+}
+.today-strip b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.today-text { display: flex; flex-wrap: wrap; justify-content: center; gap: 0 6px; }
+.today-per { color: var(--muted); }
+.today-per::before { content: '·'; margin-right: 6px; }
+.today-per b { color: var(--ok-ink); }
+
