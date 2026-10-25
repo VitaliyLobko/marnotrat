@@ -401,7 +401,7 @@ a { color: var(--brand-text); }
 /* ---------- екран суми ---------- */
 
 .amt-head { display: flex; align-items: center; gap: 4px; min-height: 60px; padding: env(safe-area-inset-top) 6px 0; border-bottom: 1px solid var(--line); box-shadow: 0 1px 4px rgb(0 0 0 / .08); }
-.amt-route { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 6px; color: var(--muted); font-size: 18px; }
+.amt-route { flex: 1; min-width: 0; display: grid; grid-template-columns: minmax(0, max-content) auto minmax(0, max-content); justify-content: center; align-items: center; gap: 6px; color: var(--muted); font-size: 17px; }
 .amt-end { display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; }
 .amt-end > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .amt-head .mini-coin { width: 30px; }
@@ -413,6 +413,10 @@ a { color: var(--brand-text); }
 .amt-cur { font-size: 18px; color: var(--text-2); }
 .amt-res { text-align: right; color: var(--muted); font-size: 18px; min-height: 1.4em; }
 .amt-note { text-align: right; color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
+.amt-budget { text-align: right; color: var(--text-2); font-size: 14px; }
+.amt-budget.over { color: var(--over-ink); font-weight: 600; }
+.amt-quick { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.amt-quick .chip { min-height: 36px; padding: 4px 12px; font-size: 14px; }
 .amt-tags { display: flex; align-items: center; gap: 4px; min-height: 52px; padding: 0 6px 0 12px; background: var(--surface-2); }
 .amt-tags-list { flex: 1; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
 .amt-tag { flex: none; padding: 8px 10px; border: 0; border-radius: 999px; background: none; color: var(--muted); font-size: 18px; }
@@ -429,6 +433,8 @@ a { color: var(--brand-text); }
 .dates { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--brand); color: var(--brand-ink); padding-bottom: env(safe-area-inset-bottom); }
 .dates button { min-height: 56px; border: 0; background: none; color: inherit; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; display: grid; place-items: center; }
 .dates button:active { background: rgb(0 0 0 / .12); }
+.dates.with-del { grid-template-columns: 1fr 64px; grid-auto-flow: row; }
+.dates .dates-del { border-left: 1px solid rgb(255 255 255 / .25); }
 .date-hidden { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .amt-panel { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; background: var(--surface); border-top: 1px solid var(--line); }
 
@@ -754,4 +760,7 @@ details.icon-group > .icon-row { padding-bottom: 10px; }
 }
 .today-strip b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
 .today-strip .ico svg { width: 18px; height: 18px; color: var(--muted); }
+.today-text { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.today-per { font-size: 13px; color: var(--muted); }
+.today-per b { color: var(--ok-ink); font-size: 13px; }
 

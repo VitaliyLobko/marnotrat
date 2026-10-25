@@ -728,8 +728,16 @@ function todayStrip() {
   const today = M.ymd();
   const n = state.ops.filter((op) => op.date === today).length;
   const { expense } = totals(today);
+  // Скільки можна витрачати щодня до кінця періоду, щоб лишитись у бюджетах: залишок ÷ дні разом із сьогоднішнім
+  const plan = planTotal();
+  const cur = currentPeriod();
+  const left = plan - totals(cur).expense;
+  const days = Math.round((M.parseYmd(periodRange(cur)[1]) - M.parseYmd(today)) / 864e5) + 1;
+  const perDay = plan && left > 0 ? h('span', { class: 'today-per' }, 'можна ще ', h('b', {}, M.money(Math.round(left / days))), ' на день') : null;
   return h('button', { type: 'button', class: 'today-strip', onClick: () => { dayDate = today; go('days'); } },
-    icon('daily'), n ? ['Сьогодні: ', h('b', {}, expense ? `− ${M.money(expense)}` : M.money(0)), ` · ${n} ${opsWord(n)}`] : 'Сьогодні ще без операцій');
+    icon('daily'), h('span', { class: 'today-text' },
+      h('span', {}, n ? ['Сьогодні: ', h('b', {}, expense ? `− ${M.money(expense)}` : M.money(0)), ` · ${n} ${opsWord(n)}`] : 'Сьогодні ще без операцій'),
+      perDay));
 }
 
 // ---------- перетягування монет ----------
@@ -1095,6 +1103,9 @@ function openAmount({ from, to, op = null, preset = null }) {
   // З цілі — видно, скільки там є, і тапом забрати все
   const avail = h('button', { type: 'button', class: 'amt-avail' });
   const note = h('div', { class: 'amt-note' });
+  // Що станеться з бюджетом витрати після збереження; часті коментарі цієї витрати — одним тапом
+  const budgetLine = h('div', { class: 'amt-budget' });
+  const quick = h('div', { class: 'amt-quick' });
   const tagBar = h('div', { class: 'amt-tags' });
   const lower = h('div', {});
 
@@ -1114,11 +1125,43 @@ function openAmount({ from, to, op = null, preset = null }) {
     avail.hidden = src.kind !== 'goal';
     avail.textContent = `у цілі ${M.money(inGoal, src.currency)} · забрати все`;
     avail.onclick = () => { d.a = M.toExpr(inGoal); d.active = 'a'; d.b = ''; d.bOwn = false; d.bTyped = false; paint(); };
-    note.textContent = [d.tags.map((t) => `#${t}`).join(' '), d.comment, d.repeat.every ? `⟳ ${M.repeatLabel(d.repeat.every)}${d.repeat.until ? ` до ${M.dateTitle(d.repeat.until)}` : ''}` : '',
+    paintQuick();
+    // Коментар, вибраний чипом, уже видно на чипі
+    note.textContent = [d.tags.map((t) => `#${t}`).join(' '), quickList.includes(d.comment) ? '' : d.comment, d.repeat.every ? `⟳ ${M.repeatLabel(d.repeat.every)}${d.repeat.until ? ` до ${M.dateTitle(d.repeat.until)}` : ''}` : '',
       d.warranty ? `гарантія до ${dmy(d.warranty)}` : '', d.photos.length ? `фото: ${d.photos.length}` : ''].filter(Boolean).join(' · ');
+    paintBudget();
     paintTags();
     pad.querySelector('[aria-label="Повторювати"]')?.classList.toggle('on', Boolean(d.repeat.every));
     pad.querySelector('[aria-label="Деталі"]')?.classList.toggle('on', Boolean(d.warranty || d.photos.length));
+  };
+  const paintBudget = () => {
+    const cur = currentPeriod();
+    const show = dst.kind === 'expense' && dst.budget > 0 && periodOf(d.date) === cur;
+    budgetLine.hidden = !show;
+    if (!show) return;
+    // Правка операції цього ж періоду: стара сума вже сидить у витраченому
+    const was = op && op.to === dst.id && periodOf(op.date) === cur ? amountIn(op) : 0;
+    const v = two ? valueB() : valueA();
+    const rest = dst.budget - (monthSpent(dst, cur) - was + (v > 0 ? v : 0));
+    budgetLine.classList.toggle('over', rest < 0);
+    budgetLine.textContent = rest >= 0
+      ? `${dst.name}: лишиться ${M.money(rest, dst.currency)} з ${M.money(dst.budget, dst.currency)}`
+      : `${dst.name}: понад бюджет на ${M.money(-rest, dst.currency)}`;
+  };
+  let quickFor = null;
+  let quickList = [];
+  const paintQuick = () => {
+    if (quickFor !== dst.id) {
+      quickFor = dst.id;
+      const n = new Map();
+      for (const o of state.ops) if (o.to === dst.id && o.comment) n.set(o.comment, (n.get(o.comment) ?? 0) + 1);
+      quickList = dst.kind === 'expense' ? [...n].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([c]) => c) : [];
+    }
+    quick.hidden = !quickList.length;
+    quick.replaceChildren(...quickList.map((c) => h('button', {
+      type: 'button', class: `chip${d.comment === c ? ' on' : ''}`, 'aria-pressed': String(d.comment === c),
+      onClick: () => { d.comment = d.comment === c ? '' : c; paint(); },
+    }, c)));
   };
   const paintTags = () => {
     const sugg = [...new Set([...d.tags, ...tagsFor(to)])].slice(0, 8);
@@ -1225,9 +1268,12 @@ function openAmount({ from, to, op = null, preset = null }) {
       key('=', equals, 'Дорівнює'), key('÷', () => operator('÷'), 'Поділити')));
 
   const dates = base
-    ? h('div', { class: 'dates' }, h('button', {
-      type: 'button', onClick: () => pickDate((v) => { d.date = v; dates.firstChild.textContent = M.dateTitle(v); }),
-    }, M.dateTitle(d.date)), dateInput)
+    ? h('div', { class: `dates${op ? ' with-del' : ''}` }, h('button', {
+      type: 'button', onClick: () => pickDate((v) => { d.date = v; dates.firstChild.textContent = M.dateTitle(v); paint(); }),
+    }, M.dateTitle(d.date)),
+    // Видалення — внизу, подалі від ✓ «Зберегти»: поруч їх легко сплутати
+    op ? h('button', { type: 'button', class: 'dates-del', 'aria-label': 'Видалити', onClick: () => remove() }, icon('trash')) : null,
+    dateInput)
     : h('div', { class: 'dates' },
       h('button', { type: 'button', onClick: () => store(M.addDays(M.ymd(), -1)) }, 'Вчора'),
       h('button', { type: 'button', onClick: () => store(M.ymd()) }, 'Сьогодні'),
@@ -1334,9 +1380,8 @@ function openAmount({ from, to, op = null, preset = null }) {
     h('div', { class: 'amt-head' },
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Скасувати', onClick: () => closeSheet() }, icon('close')),
       route,
-      op ? h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Видалити', onClick: remove }, icon('trash')) : null,
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Зберегти', onClick: () => store() }, icon('check'))),
-    h('div', { class: 'amt-body' }, lineA, lineB, res, avail, note));
+    h('div', { class: 'amt-body' }, lineA, lineB, res, avail, note, budgetLine, quick));
   lower.replaceChildren(pad, dates);
   sheet(`${src.name} → ${dst.name}`, [screen.firstChild, screen.lastChild, tagBar, lower], { cls: 'screen', bare: true });
   paintRoute();
@@ -2556,14 +2601,18 @@ function barPath(x, w, y0, y1) {
 function viewHistory() {
   const s = histSeries(histKey);
   const cur = currentPeriod();
-  const keys = Array.from({ length: HIST_N }, (_, i) => M.addMonths(cur, i - HIST_N + 1));
+  // Місяці до першої операції — не нулі, а «ще не було»: графік починається з першого, щонайменше 3 колонки
+  const firstOp = state.ops.reduce((m, op) => (op.date < m ? op.date : m), '9999');
+  const since = firstOp === '9999' ? cur : periodOf(firstOp);
+  let n = 1;
+  while (n < HIST_N && M.addMonths(cur, -n) >= since) n += 1;
+  n = Math.max(3, n);
+  const keys = Array.from({ length: n }, (_, i) => M.addMonths(cur, i - n + 1));
   const vals = keys.map((k) => s.value(k));
   // Прогноз на поточний період — лише для витрат: темп «скільки вже» ÷ «яка частка минула»
   const el = periodElapsed(cur);
   const fc = s.kind === 'exp' && el > 0 && el < 1 && vals.at(-1) > 0 ? vals.at(-1) / el : null;
-  // Середнє — по повних періодах, відколи є операції (місяці до першої операції — не нулі, а «ще не було»)
-  const firstOp = state.ops.reduce((m, op) => (op.date < m ? op.date : m), '9999');
-  const since = firstOp === '9999' ? cur : periodOf(firstOp);
+  // Середнє — по повних періодах, відколи є операції
   const full = keys.slice(0, -1).map((k, i) => [k, vals[i]]).filter(([k]) => k >= since);
   const avg = full.length ? full.reduce((a, [, v]) => a + v, 0) / full.length : null;
   const pick = histPick && keys.includes(histPick) ? histPick : cur;
@@ -2577,7 +2626,7 @@ function viewHistory() {
   const lo = Math.min(0, ...vals);
   const span = hi - lo || 1;
   const y = (v) => top + ((hi - v) / span) * (H - top - bottom);
-  const slot = W / HIST_N;
+  const slot = W / n;
   const bw = Math.min(22, slot - 6);
   const y0 = y(0);
   const fill = (v) => (s.kind === 'net' ? (v >= 0 ? 'var(--plus)' : 'var(--minus)') : 'var(--s1)');
@@ -2588,7 +2637,7 @@ function viewHistory() {
     n.append(...kids.flat().filter(Boolean));
     return n;
   };
-  const svg = sv('svg', { viewBox: `0 0 ${W} ${H}`, class: 'hist-svg', role: 'img', 'aria-label': `${s.name} за ${HIST_N} місяців` },
+  const svg = sv('svg', { viewBox: `0 0 ${W} ${H}`, class: 'hist-svg', role: 'img', 'aria-label': `${s.name} за ${n} міс.` },
     sv('line', { x1: 0, x2: W, y1: y0, y2: y0, class: 'hist-zero' }),
     keys.map((k, i) => {
       const x = i * slot + (slot - bw) / 2;
@@ -2626,7 +2675,7 @@ function viewHistory() {
   const sum12 = vals.reduce((a, v) => a + v, 0);
   const stats = h('div', { class: 'card sub-total' },
     tile('Середнє за місяць', avg == null ? '—' : fmt(avg), full.length ? `за ${full.length} повн. міс.` : 'ще немає повного місяця'),
-    tile(`Разом за ${HIST_N} міс.`, fmt(sum12)));
+    tile(`Разом за ${n} міс.`, fmt(sum12)));
   const table = h('details', { class: 'card fold-card' }, h('summary', {}, 'Таблицею'),
     h('table', { class: 'hist-table' }, h('tbody', {}, [...keys].reverse().map((k) => h('tr', {},
       h('td', {}, periodTitle(k)), h('td', {}, fmt(vals[keys.indexOf(k)])))))));
@@ -2634,8 +2683,7 @@ function viewHistory() {
     histSelect(),
     h('div', { class: 'card hist-card' }, readout, svg,
       h('p', { class: 'hist-key muted small' },
-        fc ? h('span', { class: 'hist-key-fc' }, 'пунктир — прогноз') : null,
-        avg != null ? h('span', { class: 'hist-key-avg' }, 'лінія — середнє') : null)),
+        fc ? h('span', { class: 'hist-key-fc' }, 'пунктир — прогноз') : null)),
     stats, table);
 }
 
