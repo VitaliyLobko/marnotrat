@@ -6,6 +6,7 @@ import * as Sync from './sync.js';
 import * as Bot from './bot.js';
 import { cursors, exchange } from './cloud.js';
 import { CHANGES, changesSince } from './changes.js';
+import * as Csv from './csv.js';
 import { $, h, icon, hasIcon, toast, sheet, closeSheet, chips, swipeStep, vibrate } from './ui.js';
 
 const state = { coins: [], ops: [], meta: [] };
@@ -553,6 +554,19 @@ function headStats() {
       : stat('Доходи', income, report('income')));
 }
 
+/**
+ * Середня витрата монети за повні періоди перед ym — до трьох і лише відколи є операції
+ * (місяці до першої — не нулі, а «ще не було»): { avg, n } у валюті монети або null.
+ */
+function avgSpent(c, ym, max = 3) {
+  const first = cached('firstOp', () => state.ops.reduce((m, op) => (op.date < m ? op.date : m), '9999'));
+  if (first === '9999') return null;
+  const since = periodOf(first);
+  const keys = [];
+  for (let i = 1; i <= max && M.addMonths(ym, -i) >= since; i++) keys.push(M.addMonths(ym, -i));
+  return keys.length ? { avg: keys.reduce((s, k) => s + monthSpent(c, k), 0) / keys.length, n: keys.length } : null;
+}
+
 /** Колір монети витрати за поточний місяць — з темпом і кількістю операцій. */
 function coinBudget(c, spent, ym = currentPeriod()) {
   const count = monthMoves(c, ym)?.n ?? 0;
@@ -620,7 +634,8 @@ function coinEl(c, ym) {
   const face = h('div', { class: 'coin-face', style: { '--fill': String(fill) } },
     c.kind === 'expense' ? h('span', { class: 'coin-fill' }) : null,
     icon(hasIcon(c.icon) ? c.icon : 'coins', 'ico coin-ico'));
-  const el = h('div', { class: `coin k-${c.kind}${st ? ` st-${st}` : ''}`, 'data-id': c.id, 'data-kind': c.kind },
+  const zero = Math.abs(sum) < 0.005 && c.kind !== 'debt' ? ' zero' : '';
+  const el = h('div', { class: `coin k-${c.kind}${st ? ` st-${st}` : ''}${zero}`, 'data-id': c.id, 'data-kind': c.kind },
     h('div', { class: 'coin-name' }, c.name),
     face,
     sumEl(c, sum),
@@ -714,8 +729,29 @@ function viewMain() {
     pager('account', [...state.coins.filter((c) => (c.kind === 'account' || c.kind === 'debt') && !c.archived)
       .sort((a, b) => a.order - b.order).map((c) => coinEl(c, ym)), addCoinEl('account')], 4, 'coin-row accounts'),
     pager('expense', [...grid.map((c) => coinEl(c, ym)), addCoinEl('expense')], 16, 'expenses'),
-    state.ops.length ? null : h('p', { class: 'muted small main-hint' },
+    state.ops.length ? todayStrip() : h('p', { class: 'muted small main-hint' },
       'Тягни монету пальцем: дохід — на рахунок, рахунок — на витрату чи інший рахунок. Тап — історія монети, довге натискання — змінити.'));
+}
+
+const opsWord = (n) => (n % 10 === 1 && n % 100 !== 11 ? 'операція'
+  : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? 'операції' : 'операцій');
+
+/** Підсумок сьогодні під монетами — тап веде у «Звіт по днях» на сьогодні. */
+function todayStrip() {
+  if (editing()) return null;
+  const today = M.ymd();
+  const n = state.ops.filter((op) => op.date === today).length;
+  const { expense } = totals(today);
+  // Скільки можна витрачати щодня до кінця періоду, щоб лишитись у бюджетах: залишок ÷ дні разом із сьогоднішнім
+  const plan = planTotal();
+  const cur = currentPeriod();
+  const left = plan - totals(cur).expense;
+  const days = Math.round((M.parseYmd(periodRange(cur)[1]) - M.parseYmd(today)) / 864e5) + 1;
+  const perDay = plan && left > 0 ? h('span', { class: 'today-per' }, 'можна ще ', h('b', {}, M.money(Math.round(left / days))), ' на день') : null;
+  return h('button', { type: 'button', class: 'today-strip', onClick: () => { dayDate = today; go('days'); } },
+    icon('daily'), h('span', { class: 'today-text' },
+      h('span', {}, n ? ['Сьогодні: ', h('b', {}, expense ? `− ${M.money(expense)}` : M.money(0)), ` · ${n} ${opsWord(n)}`] : 'Сьогодні ще без операцій'),
+      perDay));
 }
 
 // ---------- перетягування монет ----------
@@ -1048,9 +1084,10 @@ const allTags = () => [...new Set(state.ops.flatMap((op) => op.tags ?? []))].sor
  * Введення суми після перетягування (op — правка наявної операції).
  * Різні валюти «звідки» й «куди» — два рядки; другий рахується за курсом, поки його не змінили руками.
  */
-function openAmount({ from, to, op = null, preset = null }) {
-  // preset — запланований повтор: поля з правила, зберігається новою операцією з fromRule
-  const base = op ?? preset;
+function openAmount({ from, to, op = null, preset = null, copy = null }) {
+  // preset — запланований повтор: поля з правила, зберігається новою операцією з fromRule;
+  // copy — «Повторити»: сума, теги й коментар наявної операції, але нова операція на сьогодні
+  const base = op ?? preset ?? copy;
   // Звідки й куди можна змінити тапом по монеті вгорі — тому не const
   let src = coinOr(from);
   let dst = coinOr(to);
@@ -1081,6 +1118,9 @@ function openAmount({ from, to, op = null, preset = null }) {
   // З цілі — видно, скільки там є, і тапом забрати все
   const avail = h('button', { type: 'button', class: 'amt-avail' });
   const note = h('div', { class: 'amt-note' });
+  // Що станеться з бюджетом витрати після збереження; часті коментарі цієї витрати — одним тапом
+  const budgetLine = h('div', { class: 'amt-budget' });
+  const quick = h('div', { class: 'amt-quick' });
   const tagBar = h('div', { class: 'amt-tags' });
   const lower = h('div', {});
 
@@ -1100,11 +1140,43 @@ function openAmount({ from, to, op = null, preset = null }) {
     avail.hidden = src.kind !== 'goal';
     avail.textContent = `у цілі ${M.money(inGoal, src.currency)} · забрати все`;
     avail.onclick = () => { d.a = M.toExpr(inGoal); d.active = 'a'; d.b = ''; d.bOwn = false; d.bTyped = false; paint(); };
-    note.textContent = [d.tags.map((t) => `#${t}`).join(' '), d.comment, d.repeat.every ? `⟳ ${M.repeatLabel(d.repeat.every)}${d.repeat.until ? ` до ${M.dateTitle(d.repeat.until)}` : ''}` : '',
+    paintQuick();
+    // Коментар, вибраний чипом, уже видно на чипі
+    note.textContent = [d.tags.map((t) => `#${t}`).join(' '), quickList.includes(d.comment) ? '' : d.comment, d.repeat.every ? `⟳ ${M.repeatLabel(d.repeat.every)}${d.repeat.until ? ` до ${M.dateTitle(d.repeat.until)}` : ''}` : '',
       d.warranty ? `гарантія до ${dmy(d.warranty)}` : '', d.photos.length ? `фото: ${d.photos.length}` : ''].filter(Boolean).join(' · ');
+    paintBudget();
     paintTags();
     pad.querySelector('[aria-label="Повторювати"]')?.classList.toggle('on', Boolean(d.repeat.every));
     pad.querySelector('[aria-label="Деталі"]')?.classList.toggle('on', Boolean(d.warranty || d.photos.length));
+  };
+  const paintBudget = () => {
+    const cur = currentPeriod();
+    const show = dst.kind === 'expense' && dst.budget > 0 && periodOf(d.date) === cur;
+    budgetLine.hidden = !show;
+    if (!show) return;
+    // Правка операції цього ж періоду: стара сума вже сидить у витраченому
+    const was = op && op.to === dst.id && periodOf(op.date) === cur ? amountIn(op) : 0;
+    const v = two ? valueB() : valueA();
+    const rest = dst.budget - (monthSpent(dst, cur) - was + (v > 0 ? v : 0));
+    budgetLine.classList.toggle('over', rest < 0);
+    budgetLine.textContent = rest >= 0
+      ? `${dst.name}: лишиться ${M.money(rest, dst.currency)} з ${M.money(dst.budget, dst.currency)}`
+      : `${dst.name}: понад бюджет на ${M.money(-rest, dst.currency)}`;
+  };
+  let quickFor = null;
+  let quickList = [];
+  const paintQuick = () => {
+    if (quickFor !== dst.id) {
+      quickFor = dst.id;
+      const n = new Map();
+      for (const o of state.ops) if (o.to === dst.id && o.comment) n.set(o.comment, (n.get(o.comment) ?? 0) + 1);
+      quickList = dst.kind === 'expense' ? [...n].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([c]) => c) : [];
+    }
+    quick.hidden = !quickList.length;
+    quick.replaceChildren(...quickList.map((c) => h('button', {
+      type: 'button', class: `chip${d.comment === c ? ' on' : ''}`, 'aria-pressed': String(d.comment === c),
+      onClick: () => { d.comment = d.comment === c ? '' : c; paint(); },
+    }, c)));
   };
   const paintTags = () => {
     const sugg = [...new Set([...d.tags, ...tagsFor(to)])].slice(0, 8);
@@ -1210,10 +1282,15 @@ function openAmount({ from, to, op = null, preset = null }) {
       key('+', () => operator('+'), 'Плюс'), key('×', () => operator('×'), 'Помножити'),
       key('=', equals, 'Дорівнює'), key('÷', () => operator('÷'), 'Поділити')));
 
-  const dates = base
-    ? h('div', { class: 'dates' }, h('button', {
-      type: 'button', onClick: () => pickDate((v) => { d.date = v; dates.firstChild.textContent = M.dateTitle(v); }),
-    }, M.dateTitle(d.date)), dateInput)
+  const dates = op || preset
+    ? h('div', { class: `dates${op ? ' with-del' : ''}` }, h('button', {
+      type: 'button', onClick: () => pickDate((v) => { d.date = v; dates.firstChild.textContent = M.dateTitle(v); paint(); }),
+    }, M.dateTitle(d.date)),
+    // Ще раз така сама — нова операція з тими ж монетами, сумою, тегами й коментарем
+    op ? h('button', { type: 'button', class: 'dates-act', 'aria-label': 'Повторити', title: 'Повторити', onClick: () => openAmount({ from, to, copy: op }) }, icon('copy')) : null,
+    // Видалення — внизу, подалі від ✓ «Зберегти»: поруч їх легко сплутати
+    op ? h('button', { type: 'button', class: 'dates-act', 'aria-label': 'Видалити', onClick: () => remove() }, icon('trash')) : null,
+    dateInput)
     : h('div', { class: 'dates' },
       h('button', { type: 'button', onClick: () => store(M.addDays(M.ymd(), -1)) }, 'Вчора'),
       h('button', { type: 'button', onClick: () => store(M.ymd()) }, 'Сьогодні'),
@@ -1320,9 +1397,8 @@ function openAmount({ from, to, op = null, preset = null }) {
     h('div', { class: 'amt-head' },
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Скасувати', onClick: () => closeSheet() }, icon('close')),
       route,
-      op ? h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Видалити', onClick: remove }, icon('trash')) : null,
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Зберегти', onClick: () => store() }, icon('check'))),
-    h('div', { class: 'amt-body' }, lineA, lineB, res, avail, note));
+    h('div', { class: 'amt-body' }, lineA, lineB, res, avail, note, budgetLine, quick));
   lower.replaceChildren(pad, dates);
   sheet(`${src.name} → ${dst.name}`, [screen.firstChild, screen.lastChild, tagBar, lower], { cls: 'screen', bare: true });
   paintRoute();
@@ -1358,10 +1434,14 @@ function opRow(op) {
     op.warranty && !op.plan ? `гарантія до ${dmy(op.warranty)}` : '', op.photos?.length && !op.plan ? `фото: ${op.photos.length}` : '',
     op.plan ? '' : slNote(op)].filter(Boolean);
   const second = op.amountTo != null && t === 'transfer' ? ` → ${M.money(op.amountTo, dst.currency)}` : '';
+  // У стрічці однієї монети її назва в кожному рядку — шум: лишаємо лише другий кінець
+  const other = feedCoin === op.to ? src : feedCoin === op.from ? dst : null;
+  const ends = h('span', { class: 'op-ends' }, other ? h('span', { class: 'op-to' }, other.name)
+    : [h('span', { class: 'op-from' }, src.name), h('span', { class: 'op-to' }, dst.name)]);
   // Запланований повтор: тап — провести з правкою суми, свайп вправо — провести як є, вліво — пропустити чи зупинити
   if (op.plan) {
     const row = h('button', { type: 'button', class: `op-row plan${op.date <= M.ymd() ? ' due' : ''}`, onClick: () => openAmount({ from: op.from, to: op.to, preset: op }) },
-      h('span', { class: 'op-ends' }, h('span', { class: 'op-from' }, src.name), h('span', { class: 'op-to' }, dst.name)),
+      ends,
       h('span', { class: 'op-right' },
         h('span', { class: `op-sum ${t}` }, M.money(v, cur, { sign }) + second),
         note.map((x) => h('span', { class: 'op-note' }, x)),
@@ -1369,7 +1449,7 @@ function opRow(op) {
     return swipeRow(row, { onLeft: () => planMenu(op), onRight: () => confirmPlan(op), labels: ['Провести', 'Пропустити'] });
   }
   const row = h('button', { type: 'button', class: 'op-row', onClick: () => openAmount({ from: op.from, to: op.to, op }) },
-    h('span', { class: 'op-ends' }, h('span', { class: 'op-from' }, src.name), h('span', { class: 'op-to' }, dst.name)),
+    ends,
     h('span', { class: 'op-right' },
       h('span', { class: `op-sum ${t}` }, M.money(v, cur, { sign }) + second),
       note.map((x) => h('span', { class: 'op-note' }, x))));
@@ -1525,7 +1605,8 @@ const byNewest = (a, b) => cmp(b.date, a.date) || (b.created ?? b.updated ?? 0) 
  * дохід — плюс отримане, рахунок і ціль — прихід мінус розхід.
  */
 function coinDayFoot(c, dayOps) {
-  if (!c) return null;
+  // Одна операція за день — підсумок лише повторив би її суму
+  if (!c || dayOps.filter((op) => !op.plan).length < 2) return null;
   let v = 0;
   for (const op of dayOps) {
     if (op.plan) continue;
@@ -1563,15 +1644,18 @@ function opsChange(list) {
 
 const signedUah = (v) => M.money(v, 'UAH', { sign: v > 0 ? '+ ' : v < 0 ? '− ' : '' });
 
+/** Операції під поточні монету, тип і пошук стрічки — новіші першими. */
+const feedOps = (list, q = searchKey(feedQuery)) => list
+  .filter((op) => !feedCoin || op.from === feedCoin || op.to === feedCoin)
+  .filter((op) => feedType === 'all' || opType(op) === feedType)
+  .filter((op) => opMatches(op, q))
+  .sort(byNewest);
+
 /** Список днів стрічки під поточні монету, пошук і тип. */
 function feedList() {
   const q = searchKey(feedQuery);
   const filtered = Boolean(q) || feedType !== 'all';
-  const ops = [...state.ops, ...planned()]
-    .filter((op) => !feedCoin || op.from === feedCoin || op.to === feedCoin)
-    .filter((op) => feedType === 'all' || opType(op) === feedType)
-    .filter((op) => opMatches(op, q))
-    .sort(byNewest);
+  const ops = feedOps([...state.ops, ...planned()], q);
   if (!ops.length) {
     return [h('p', { class: 'empty' }, filtered ? 'Нічого не знайдено'
       : feedCoin ? 'У цієї монети ще немає операцій' : 'Ще немає операцій — потягни монету на головній')];
@@ -1695,8 +1779,10 @@ function reportParts(kind) {
   const list = [...sums]
     .map(([k, v]) => ({ c: reportTags ? { id: `tag:${k}`, name: k ? `#${k}` : 'Без тегу', tag: k } : coinOr(k), v }))
     .filter((x) => x.v > 0).sort((a, b) => b.v - a.v);
-  const top = list.slice(0, SLOTS).map((x, i) => ({ ...x, color: `var(--s${i + 1})` }));
-  const rest = list.slice(SLOTS);
+  // «Інше» з однієї частки нічого не ховає — тоді вона йде восьмою своїм кольором
+  const slots = list.length === SLOTS + 1 ? SLOTS + 1 : SLOTS;
+  const top = list.slice(0, slots).map((x, i) => ({ ...x, color: `var(--s${i + 1})` }));
+  const rest = list.slice(slots);
   if (rest.length) top.push({ c: { id: 'other', name: `Інше (${rest.length})` }, v: rest.reduce((s, x) => s + x.v, 0), color: 'var(--s-other)', rest });
   return top;
 }
@@ -1765,6 +1851,9 @@ function periodNav(title, step) {
   return nav;
 }
 
+// Відхилення від середнього, з якого його видно: менше — звичайне коливання
+const DELTA_SHOWN = 0.2;
+
 function viewReport() {
   const parts = reportParts(reportKind);
   const total = parts.reduce((s, p) => s + p.v, 0);
@@ -1779,11 +1868,22 @@ function viewReport() {
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Повернутись до місяців', onClick: () => { reportFilter.from = ''; reportFilter.to = ''; reportPick = null; render(); } }, icon('close')))
     : periodNav(reportTitle(), stepMonth);
   const what = reportKind === 'expense' ? 'витрат' : 'доходів';
+  // Монета проти свого середнього за 3 попередні місяці; поточний — за темпом, як колір монет.
+  // На початку місяця, зі своїм періодом чи фільтром рахунків порівнювати нема з чим
+  const el = reportMonth === currentPeriod() ? periodElapsed(reportMonth) : 1;
+  const compare = reportKind === 'expense' && !reportTags && !filterOn() && el >= 0.25;
+  const delta = (p) => {
+    const a = compare && !p.rest ? avgSpent(p.c, reportMonth) : null;
+    const r = a?.avg > 0 ? p.v / (toUah(a.avg, p.c.currency) * el) - 1 : 0;
+    const big = Math.abs(r) >= DELTA_SHOWN;
+    return h('span', { class: `rep-delta${big ? (r > 0 ? ' up' : ' down') : ''}`, title: big ? `Порівняно із середнім за ${a.n} міс.` : null },
+      big ? `${r > 0 ? '↑' : '↓'} ${Math.round(Math.abs(r) * 100)}%` : '');
+  };
   const body = h('div', { class: 'page stack' },
     nav,
     total ? donut(parts, total, picked
       ? [h('span', {}, picked.c.name), h('b', {}, M.money(picked.v)), h('span', {}, `${Math.round((picked.v / total) * 100)}%`)]
-      : [h('span', {}, custom ? shortRange() : periodTitle(reportMonth)), h('b', {}, M.money(real))])
+      : [h('span', {}, reportKind === 'expense' ? 'витрати' : 'доходи'), h('b', {}, M.money(real))])
       : h('p', { class: 'empty' }, custom ? `За цей період ${what} немає` : `Цього місяця ${what} немає`),
     total ? h('div', { class: 'card' }, parts.map((p) => h('button', {
       type: 'button', class: `rep-row${reportPick === p.c.id ? ' on' : ''}`,
@@ -1794,6 +1894,7 @@ function viewReport() {
     },
     h('span', { class: 'rep-dot', style: { background: p.color } }),
     h('span', { class: 'rep-name' }, p.c.name),
+    delta(p),
     h('span', { class: 'rep-pct' }, `${Math.round((p.v / total) * 100)}%`),
     h('span', { class: 'rep-sum' }, M.money(p.v))))) : null);
   if (!custom) swipeStep(body, stepMonth);
@@ -1869,9 +1970,10 @@ function viewDays() {
     list.length ? h('div', { class: 'card' }, list.map((r) => h('div', { class: 'kv' },
       h('span', {}, r.name), h('span', { class: r.v > 0 ? 'plus' : 'minus' }, signed(r.v)))))
       : h('p', { class: 'empty' }, 'Цього дня доходів і витрат немає'),
-    h('div', { class: 'card' },
+    // Підсумок має сенс, коли були і дохід, і витрата: інакше він повторює велику суму вгорі
+    income && expense ? h('div', { class: 'card' },
       h('div', { class: 'kv' }, h('b', {}, 'Дохід'), h('span', { class: 'plus' }, signed(income))),
-      h('div', { class: 'kv' }, h('b', {}, 'Витрата'), h('span', { class: 'minus' }, signed(-expense)))));
+      h('div', { class: 'kv' }, h('b', {}, 'Витрата'), h('span', { class: 'minus' }, signed(-expense)))) : null);
   return swipeStep(body, step);
 }
 
@@ -1951,6 +2053,11 @@ function editCoin(orig, kind = orig?.kind) {
   const amountField = (value, label) => h('input', { type: 'number', inputmode: 'decimal', step: '0.01', min: '0', value: value || '', placeholder: '0', 'aria-label': label });
   const budgetLabel = { income: 'План на місяць (не обов’язково)', expense: 'Бюджет на місяць', goal: 'Скільки треба зібрати' }[kind];
   const budget = amountField(d.budget, budgetLabel);
+  // Порада — середня витрата за попередні місяці, вгору до сотень; поле заповнює тап, зберігаєш сам
+  const advice = orig && kind === 'expense' ? avgSpent(orig, currentPeriod()) : null;
+  const advised = advice?.avg > 0 ? Math.ceil(advice.avg / 100) * 100 : 0;
+  const adviceBtn = advised ? h('button', { type: 'button', class: 'chip advice', onClick: () => { budget.value = String(advised); } },
+    `Порадь: ${M.money(advised, d.currency)} — середнє за ${advice.n} міс.`) : null;
   const startLabel = kind === 'goal' ? 'Уже відкладено' : 'Залишок зараз';
   const start = amountField(orig ? balance(orig) : 0, startLabel);
   const grid = iconPicker(d);
@@ -2002,7 +2109,7 @@ function editCoin(orig, kind = orig?.kind) {
       h('label', { class: 'flabel' }, 'Повернути до (не обов’язково)'), due,
       h('label', { class: 'check-row' }, h('span', {}, 'Враховувати в «Баланс»'), counted),
     ] : null,
-    kind !== 'account' && !debt ? [h('label', { class: 'flabel' }, budgetLabel), budget] : null,
+    kind !== 'account' && !debt ? [h('label', { class: 'flabel' }, budgetLabel), budget, adviceBtn] : null,
     holds ? [h('label', { class: 'flabel' }, startLabel), start] : null,
     grid,
     h('div', { class: 'btn-grid' },
@@ -2066,6 +2173,7 @@ function viewSettings() {
   });
   const rateStatus = h('p', { class: 'muted small' }, m.manual ? 'Свій курс — НБУ не підтягується' : m.date ? `Курс НБУ на ${M.dateTitle(m.date)}` : 'Курс за замовчуванням — підтягну НБУ, щойно буде зв’язок');
   const file = h('input', { type: 'file', accept: 'application/json,.json', hidden: true, onChange: (e) => importBackup(e.target.files[0]) });
+  const csvFile = h('input', { type: 'file', accept: '.csv,text/csv,text/plain', hidden: true, onChange: (e) => { importCsv(e.target.files[0]); e.target.value = ''; } });
   const theme = chips(THEMES, recall('theme') || 'auto', (v) => { remember('theme', v); applyTheme(); });
   return h('div', { class: 'page' },
     settingsGroup('Про застосунок', [aboutPanel(), aboutCard()]),
@@ -2089,7 +2197,12 @@ function viewSettings() {
         h('div', { class: 'btn-grid' },
           h('button', { type: 'button', class: 'btn', onClick: exportBackup }, icon('archive'), 'Зберегти копію'),
           h('button', { type: 'button', class: 'btn', onClick: () => file.click() }, icon('undo'), 'Відновити з файлу')),
-        file)], { fold: 'data' }),
+        file),
+      h('section', { class: 'card set-card' },
+        h('h2', {}, 'Таблиця CSV'),
+        h('p', { class: 'muted small' }, 'Операції з таблиці: колонки «Дата», «Звідки», «Куди», «Сума», за бажанням — «Тип», «Валюта», «Теги», «Коментар». Монети шукаю за назвою, яких нема — створю; те, що вже є, пропущу. Стрічку в таблицю зберігає кнопка вгорі стрічки.'),
+        h('button', { type: 'button', class: 'btn', onClick: () => csvFile.click() }, icon('upload'), 'Імпорт з CSV'),
+        csvFile)], { fold: 'data' }),
     settingsGroup('Небезпечна зона', [h('section', { class: 'card set-card' },
       h('h2', {}, 'Почати з чистого'),
       h('p', { class: 'muted small' }, Sync.syncOn()
@@ -2197,7 +2310,6 @@ function aboutPanel() {
     h('div', { class: 'about-head' },
       h('img', { class: 'about-avatar', src: './icons/author.jpg', alt: '', width: 64, height: 64, loading: 'lazy' }),
       h('div', {},
-        h('h2', {}, 'Про застосунок'),
         h('p', { class: 'muted small' }, 'Марнотрат — облік витрат монетами: перетягнув гроші з рахунку на витрату — записано. Працює без інтернету.'),
         h('p', { class: 'small about-author' }, 'Автор — ', link('https://github.com/VitaliyLobko', 'Віталій Лобко')))),
     more('Де мої дані', h('div', { class: 'muted small' },
@@ -2208,7 +2320,8 @@ function aboutPanel() {
       h('li', {}, 'Встанови застосунок: Android — Chrome → ⋮ → «Встановити застосунок»; iPhone — Safari → «Поділитися» → «На екран „Додому“».'),
       h('li', {}, 'Довге натискання на монету — режим «Редагування»: назва, іконка, бюджет, переставити, прибрати. «+» у ряду — нова монета.'),
       h('li', {}, 'Дохід → рахунок, рахунок → витрата чи ціль, рахунок → рахунок: тягни монету пальцем на іншу й введи суму.'),
-      h('li', {}, 'Тап по монеті — її операції. У стрічці свайп вліво — видалити, вправо — змінити.'))),
+      h('li', {}, 'Тап по монеті — її операції. У стрічці свайп вліво — видалити, вправо — змінити.'),
+      h('li', {}, 'Заливка монети витрати знизу — скільки бюджету вже витрачено, сіре згори — що лишилось. Зелена — в темпі, помаранчева — витрачаєш швидше, ніж іде місяць, червона — понад бюджет. Зелений обідок без заливки — бюджету немає.'))),
     h('p', { class: 'muted small' },
       link('https://github.com/VitaliyLobko/marnotrat/issues/new', 'Повідомити про помилку'), ' · ',
       link('https://github.com/VitaliyLobko/marnotrat', 'Вихідний код')));
@@ -2222,7 +2335,7 @@ function aboutCard() {
     h('h2', {}, 'Марнотрат'),
     h('p', { class: 'muted small' }, `Версія ${self.APP_VERSION ?? '?'} · збірка ${self.APP_BUILD ?? '?'}`),
     status,
-    h('div', { class: 'btn-grid' },
+    h('div', { class: 'btn-grid stack' },
       upd.worker
         ? h('button', { type: 'button', class: 'btn primary', onClick: () => upd.worker.postMessage('skipWaiting') }, icon('refresh'), 'Оновити')
         : h('button', { type: 'button', class: 'btn', onClick: () => checkUpdate(status) }, icon('refresh'), 'Перевірити оновлення'),
@@ -2321,8 +2434,13 @@ function syncCard() {
 const backupData = () => ({ app: 'marnotrat', version: self.APP_VERSION, exported: new Date().toISOString(), ...state });
 
 function exportBackup() {
-  const url = URL.createObjectURL(new Blob([JSON.stringify(backupData(), null, 1)], { type: 'application/json' }));
-  const a = h('a', { href: url, download: `marnotrat-${M.ymd()}.json` });
+  downloadFile(JSON.stringify(backupData(), null, 1), `marnotrat-${M.ymd()}.json`, 'application/json');
+}
+
+/** Віддати текст файлом: посилання з download і клік. */
+function downloadFile(text, name, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = h('a', { href: url, download: name });
   document.body.append(a);
   a.click();
   a.remove();
@@ -2411,6 +2529,126 @@ const MENU = [
 /** Порожній екран: іконка в колі, заголовок і підказка, що робити. */
 const emptyState = (ico, title, text) => h('div', { class: 'empty-state' },
   h('span', { class: 'empty-ico' }, icon(ico)), h('b', {}, title), h('p', {}, text));
+
+// ---------- таблиця CSV ----------
+
+const TYPE_NAMES = { expense: 'Витрата', income: 'Дохід', transfer: 'Переказ' };
+const TYPE_BY_NAME = {
+  'витрата': 'expense', 'дохід': 'income', 'переказ': 'transfer', expense: 'expense', income: 'income', transfer: 'transfer',
+};
+// Яких типів монети стоять «звідки» і «куди» в операції кожного типу; перший — для нової монети
+const CSV_ENDS = {
+  expense: [['account', 'debt'], ['expense', 'goal']],
+  income: [['income'], ['account']],
+  transfer: [['account', 'debt', 'goal'], ['account', 'debt', 'goal']],
+};
+
+/** Те, що зараз у стрічці (монета, тип, пошук; усі дні, без запланованих), — файлом CSV для Excel чи Таблиць. */
+function exportCsv() {
+  const ops = feedOps(state.ops);
+  if (!ops.length) { toast('У стрічці нема операцій'); return; }
+  const rows = [['Дата', 'Тип', 'Звідки', 'Куди', 'Сума', 'Валюта', 'Сума в отримувача', 'Валюта отримувача', 'Теги', 'Коментар'],
+    ...ops.map((op) => {
+      const src = coinOr(op.from);
+      const dst = coinOr(op.to);
+      const two = op.amountTo != null;
+      return [op.date, TYPE_NAMES[opType(op)], src.name, dst.name, Csv.csvAmount(op.amount), src.currency,
+        two ? Csv.csvAmount(op.amountTo) : '', two ? dst.currency : '', (op.tags ?? []).join(', '), op.comment ?? ''];
+    })];
+  downloadFile(Csv.toCsv(rows), `marnotrat-${feedCoin ? coinOr(feedCoin).name : 'стрічка'}-${M.ymd()}.csv`, 'text/csv');
+  toast(`Збережено операцій: ${ops.length}`);
+}
+
+const lowName = (s) => s.trim().toLocaleLowerCase('uk');
+// Однакова операція: та сама дата, монети, сума й коментар — повторний імпорт її не задвоює
+const opSig = (o) => `${o.date}|${o.from}|${o.to}|${M.round2(o.amount)}|${(o.comment ?? '').trim()}`;
+
+/**
+ * Рядки таблиці → що додасться: нові операції, нові монети, скільки дублів і які рядки не прочитано.
+ * Монету шукаємо за назвою серед відповідних типів; нема — нова (у грн, якщо валюту не вказано).
+ */
+function planCsv(rows, at) {
+  const cell = (r, k) => (k in at ? String(r[at[k]] ?? '').trim() : '');
+  const found = new Map();
+  for (const c of state.coins) {
+    const k = `${c.kind}|${lowName(c.name)}`;
+    if (!found.has(k) || found.get(k).archived) found.set(k, c);
+  }
+  const fresh = [];
+  let order = Math.max(0, ...state.coins.map((c) => c.order ?? 0)) + 1;
+  const pick = (name, kinds, cur) => {
+    for (const k of kinds) {
+      const c = found.get(`${k}|${lowName(name)}`);
+      if (c) return c;
+    }
+    const c = { id: uid(), kind: kinds[0], name: name.slice(0, 30), icon: NEW_ICON[kinds[0]], currency: cur || 'UAH', budget: 0, start: 0, order: order++, archived: false };
+    found.set(`${c.kind}|${lowName(name)}`, c);
+    fresh.push(c);
+    return c;
+  };
+  const seen = new Set(state.ops.map(opSig));
+  const ops = [];
+  const bad = [];
+  let dup = 0;
+  rows.forEach((r, i) => {
+    const date = Csv.parseDate(cell(r, 'date'));
+    const amount = Csv.parseAmount(cell(r, 'amount'));
+    const fromName = cell(r, 'from');
+    const toName = cell(r, 'to');
+    // Номер рядка у файлі: заголовок — перший
+    if (!date || !amount || !fromName || !toName) { bad.push(i + 2); return; }
+    const has = (kind, name) => found.has(`${kind}|${lowName(name)}`);
+    const t = TYPE_BY_NAME[lowName(cell(r, 'type'))]
+      ?? (has('income', fromName) ? 'income' : has('account', toName) || has('debt', toName) || has('goal', toName) ? 'transfer' : 'expense');
+    const cur = Csv.parseCurrency(cell(r, 'currency'));
+    const amountTo = Csv.parseAmount(cell(r, 'amountTo'));
+    const src = pick(fromName, CSV_ENDS[t][0], cur);
+    const dst = pick(toName, CSV_ENDS[t][1], Csv.parseCurrency(cell(r, 'currencyTo')) ?? (amountTo ? null : cur));
+    const op = {
+      id: uid(), from: src.id, to: dst.id, amount, date, created: Date.now() + i,
+      tags: cell(r, 'tags').split(/[,;]|\s+(?=#)/).map((x) => x.trim().replace(/^#+/, '')).filter(Boolean),
+      comment: cell(r, 'comment').slice(0, 200),
+    };
+    if (src.currency !== dst.currency) op.amountTo = amountTo ?? M.round2(amount * rate(src.currency) / rate(dst.currency));
+    const sig = opSig(op);
+    if (seen.has(sig)) { dup += 1; return; }
+    seen.add(sig);
+    ops.push(op);
+  });
+  // Монета, потрібна лише дублям, не створюється
+  const used = new Set(ops.flatMap((o) => [o.from, o.to]));
+  return { ops, dup, bad, coins: fresh.filter((c) => used.has(c.id)) };
+}
+
+async function importCsv(f) {
+  if (!f) return;
+  const rows = Csv.parseCsv(await f.text());
+  const at = rows.length ? Csv.mapHeader(rows[0]) : {};
+  if (!['date', 'from', 'to', 'amount'].every((k) => k in at)) {
+    toast('Не бачу колонок «Дата», «Звідки», «Куди», «Сума» в першому рядку');
+    return;
+  }
+  const plan = planCsv(rows.slice(1), at);
+  const kindName = (c) => M.KINDS[c.kind].toLowerCase();
+  const badList = plan.bad.length > 8 ? `${plan.bad.slice(0, 8).join(', ')} і ще ${plan.bad.length - 8}` : plan.bad.join(', ');
+  sheet('Імпорт з таблиці', h('div', { class: 'form' },
+    h('p', {}, `Рядків: ${rows.length - 1}. Додам операцій: ${plan.ops.length}.`),
+    plan.dup ? h('p', { class: 'muted small' }, `Уже є — пропущу: ${plan.dup}.`) : null,
+    plan.bad.length ? h('p', { class: 'error-text small' }, `Не прочитав ${plan.bad.length === 1 ? 'рядок' : 'рядки'} ${badList}: нема дати, суми чи назви монети.`) : null,
+    plan.coins.length ? h('p', { class: 'muted small' }, `Нові монети: ${plan.coins.map((c) => `${c.name} (${kindName(c)})`).join(', ')}.`) : null,
+    h('div', { class: 'btn-grid' },
+      h('button', {
+        type: 'button', class: 'btn primary', disabled: !plan.ops.length, onClick: async () => {
+          closeSheet();
+          await save({ coins: { put: plan.coins }, ops: { put: plan.ops } });
+          toast(`Додано операцій: ${plan.ops.length}${plan.coins.length ? `, нових монет: ${plan.coins.length}` : ''}`, {
+            label: 'Скасувати',
+            run: () => save({ ops: { del: plan.ops.map((o) => o.id) }, coins: { del: plan.coins.map((c) => c.id) } }),
+          });
+        },
+      }, icon('check'), 'Імпортувати'),
+      h('button', { type: 'button', class: 'btn', onClick: () => closeSheet() }, 'Скасувати'))));
+}
 
 // ---------- регулярні платежі ----------
 
@@ -2534,14 +2772,18 @@ function barPath(x, w, y0, y1) {
 function viewHistory() {
   const s = histSeries(histKey);
   const cur = currentPeriod();
-  const keys = Array.from({ length: HIST_N }, (_, i) => M.addMonths(cur, i - HIST_N + 1));
+  // Місяці до першої операції — не нулі, а «ще не було»: графік починається з першого, щонайменше 3 колонки
+  const firstOp = state.ops.reduce((m, op) => (op.date < m ? op.date : m), '9999');
+  const since = firstOp === '9999' ? cur : periodOf(firstOp);
+  let n = 1;
+  while (n < HIST_N && M.addMonths(cur, -n) >= since) n += 1;
+  n = Math.max(3, n);
+  const keys = Array.from({ length: n }, (_, i) => M.addMonths(cur, i - n + 1));
   const vals = keys.map((k) => s.value(k));
   // Прогноз на поточний період — лише для витрат: темп «скільки вже» ÷ «яка частка минула»
   const el = periodElapsed(cur);
   const fc = s.kind === 'exp' && el > 0 && el < 1 && vals.at(-1) > 0 ? vals.at(-1) / el : null;
-  // Середнє — по повних періодах, відколи є операції (місяці до першої операції — не нулі, а «ще не було»)
-  const firstOp = state.ops.reduce((m, op) => (op.date < m ? op.date : m), '9999');
-  const since = firstOp === '9999' ? cur : periodOf(firstOp);
+  // Середнє — по повних періодах, відколи є операції
   const full = keys.slice(0, -1).map((k, i) => [k, vals[i]]).filter(([k]) => k >= since);
   const avg = full.length ? full.reduce((a, [, v]) => a + v, 0) / full.length : null;
   const pick = histPick && keys.includes(histPick) ? histPick : cur;
@@ -2555,7 +2797,7 @@ function viewHistory() {
   const lo = Math.min(0, ...vals);
   const span = hi - lo || 1;
   const y = (v) => top + ((hi - v) / span) * (H - top - bottom);
-  const slot = W / HIST_N;
+  const slot = W / n;
   const bw = Math.min(22, slot - 6);
   const y0 = y(0);
   const fill = (v) => (s.kind === 'net' ? (v >= 0 ? 'var(--plus)' : 'var(--minus)') : 'var(--s1)');
@@ -2566,7 +2808,7 @@ function viewHistory() {
     n.append(...kids.flat().filter(Boolean));
     return n;
   };
-  const svg = sv('svg', { viewBox: `0 0 ${W} ${H}`, class: 'hist-svg', role: 'img', 'aria-label': `${s.name} за ${HIST_N} місяців` },
+  const svg = sv('svg', { viewBox: `0 0 ${W} ${H}`, class: 'hist-svg', role: 'img', 'aria-label': `${s.name} за ${n} міс.` },
     sv('line', { x1: 0, x2: W, y1: y0, y2: y0, class: 'hist-zero' }),
     keys.map((k, i) => {
       const x = i * slot + (slot - bw) / 2;
@@ -2604,7 +2846,7 @@ function viewHistory() {
   const sum12 = vals.reduce((a, v) => a + v, 0);
   const stats = h('div', { class: 'card sub-total' },
     tile('Середнє за місяць', avg == null ? '—' : fmt(avg), full.length ? `за ${full.length} повн. міс.` : 'ще немає повного місяця'),
-    tile(`Разом за ${HIST_N} міс.`, fmt(sum12)));
+    tile(`Разом за ${n} міс.`, fmt(sum12)));
   const table = h('details', { class: 'card fold-card' }, h('summary', {}, 'Таблицею'),
     h('table', { class: 'hist-table' }, h('tbody', {}, [...keys].reverse().map((k) => h('tr', {},
       h('td', {}, periodTitle(k)), h('td', {}, fmt(vals[keys.indexOf(k)])))))));
@@ -2612,8 +2854,7 @@ function viewHistory() {
     histSelect(),
     h('div', { class: 'card hist-card' }, readout, svg,
       h('p', { class: 'hist-key muted small' },
-        fc ? h('span', { class: 'hist-key-fc' }, 'пунктир — прогноз') : null,
-        avg != null ? h('span', { class: 'hist-key-avg' }, 'лінія — середнє') : null)),
+        fc ? h('span', { class: 'hist-key-fc' }, 'пунктир — прогноз') : null)),
     stats, table);
 }
 
@@ -3047,6 +3288,7 @@ function topbar() {
     h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Назад', onClick: () => (history.length > 1 ? history.back() : go('main')) }, icon('back')),
     h('h1', {}, typeof title === 'function' ? title() : title),
     syncChip(),
+    view === 'feed' ? h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Зберегти в CSV', title: 'Зберегти в CSV', onClick: exportCsv }, icon('download')) : null,
     view === 'report' ? h('button', {
       type: 'button', class: `icon-btn${filterOn() ? ' has-dot' : ''}`, 'aria-label': filterOn() ? 'Фільтри (увімкнено)' : 'Фільтри', onClick: openReportFilter,
     }, icon('filter')) : null,
