@@ -699,6 +699,13 @@ details.icon-group > .icon-row { padding-bottom: 10px; }
 .plan-hint.warranty .ico:first-child { color: var(--warn); }
 /* панель «Деталі» вища за клавіатуру — гортається, сума вгорі не стискається */
 .amt-panel { max-height: 62dvh; overflow-y: auto; }
+/* теги в панелі гортаються самі, поле під ними стоїть на місці */
+.tag-pick { max-height: 22dvh; overflow-y: auto; align-content: flex-end; flex-shrink: 0; }
+/* панель тегів не гортається цілком — гортається лише список, поле й кнопки завжди видно */
+.amt-panel:has(> .tag-pick) { max-height: none; overflow: visible; }
+.amt-body { overflow: hidden; }
+/* поки друкуєш у панелі, клавіатура забирає пів екрана — бюджет і смуга тегів ховаються, панель лишається видно */
+.sheet.screen:has(.amt-panel :is(input, textarea):focus) :is(.amt-foot, .amt-tags) { display: none; }
 
 /* історія */
 .hist-card { padding: 14px 12px 10px; display: flex; flex-direction: column; gap: 8px; }
