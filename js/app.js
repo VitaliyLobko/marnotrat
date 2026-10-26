@@ -262,6 +262,7 @@ async function runSync({ gesture = false, loud = false } = {}) {
       noteDroppedTombs(state.meta, final.meta);
       await replaceAll(final);
       Object.assign(state, final);
+      await fixTags();
       if (Sync.stamp(final) !== Sync.stamp(merged)) sync.again = true;
       render();
     } else if (view === 'settings') render();
@@ -351,6 +352,7 @@ async function runCloud({ loud = false } = {}) {
     if (Sync.stamp(merged) !== Sync.stamp(snapshot())) {
       await replaceAll(merged);
       Object.assign(state, merged);
+      await fixTags();
       render();
     }
     // Новий телефон, а в боті порожньо — стартові монети лишаються й поїдуть наступним обміном
@@ -1243,6 +1245,35 @@ function tagsFor(to) {
 
 const allTags = () => [...new Set(state.ops.flatMap((op) => op.tags ?? []))].sort((a, b) => a.localeCompare(b, 'uk'));
 
+/** Тег в одному написанні: без «#», зайвих пробілів і великих літер — «Їжа» й «їжа » не стають двома тегами. */
+const normTag = (t) => String(t).trim().replace(/^#+/, '').replace(/\s+/g, ' ').replace(/[’ʼ`]/g, "'").toLocaleLowerCase('uk');
+
+/** Теги операції в одному написанні, без двійників і порожніх. */
+const normTags = (tags) => [...new Set((tags ?? []).map(normTag).filter(Boolean))];
+
+/** Операції, де теги записані інакше (з великої, з пробілом), — виправлені; двійники зливаються. */
+function fixedTagOps() {
+  return state.ops.filter((op) => op.tags?.length && normTags(op.tags).join('\n') !== op.tags.join('\n'))
+    .map((op) => ({ ...op, tags: normTags(op.tags) }));
+}
+
+/** Теги з іншим написанням — виправити й зберегти (піде й на інші телефони). */
+async function fixTags() {
+  const fixed = fixedTagOps();
+  if (fixed.length) await save({ ops: { put: fixed } }, { redraw: false });
+}
+
+/** Перейменувати тег у всіх операціях (у той, що вже є, — злити) чи прибрати, коли to порожній. «Скасувати» повертає як було. */
+async function retag(from, to) {
+  const before = state.ops.filter((op) => op.tags?.includes(from));
+  if (!before.length) return;
+  const after = before.map((op) => ({ ...op, tags: normTags(op.tags.flatMap((t) => (t === from ? (to ? [to] : []) : [t]))) }));
+  const merged = Boolean(to) && allTags().includes(to);
+  await save({ ops: { put: after } });
+  toast(!to ? `#${from} прибрано: ${before.length} ${opsWord(before.length)}` : `#${from} → #${to}${merged ? ' — злито' : ''}`,
+    { label: 'Скасувати', run: () => save({ ops: { put: before } }) });
+}
+
 /**
  * Введення суми після перетягування (op — правка наявної операції).
  * Різні валюти «звідки» й «куди» — два рядки; другий рахується за курсом, поки його не змінили руками.
@@ -1382,18 +1413,20 @@ function openAmount({ from, to, op = null, preset = null, copy = null }) {
       quickList = dst.kind === 'expense' ? [...n].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([c]) => c) : [];
     }
   };
-  // Над клавіатурою, під пальцем: спершу часті коментарі (💬), далі теги
+  // Над клавіатурою, під пальцем: часті коментарі (💬) окремим рядком, під ними — теги
   const paintTags = () => {
     const sugg = [...new Set([...d.tags, ...tagsFor(to)])].slice(0, 8);
-    tagBar.replaceChildren(
-      h('div', { class: 'amt-tags-list' }, quickList.map((c) => h('button', {
-        type: 'button', class: `amt-tag amt-com${d.comment === c ? ' on' : ''}`, 'aria-pressed': String(d.comment === c), 'aria-label': `Коментар: ${c}`,
-        onClick: () => { d.comment = d.comment === c ? '' : c; paint(); },
-      }, icon('comment'), c)), sugg.map((t) => h('button', {
+    const coms = quickList.length ? h('div', { class: 'amt-tags-list amt-com-list' }, quickList.map((c) => h('button', {
+      type: 'button', class: `amt-tag amt-com${d.comment === c ? ' on' : ''}`, 'aria-pressed': String(d.comment === c), 'aria-label': `Коментар: ${c}`,
+      onClick: () => { d.comment = d.comment === c ? '' : c; paint(); },
+    }, icon('comment'), c))) : null;
+    const tags = h('div', { class: 'amt-tag-row' },
+      h('div', { class: 'amt-tags-list' }, sugg.map((t) => h('button', {
         type: 'button', class: `amt-tag${d.tags.includes(t) ? ' on' : ''}`, 'aria-pressed': String(d.tags.includes(t)),
         onClick: () => { toggleTag(t); },
       }, t))),
       h('button', { type: 'button', class: 'amt-more', 'aria-label': 'Усі теги', onClick: () => showPanel('tags') }, icon('dots')));
+    tagBar.replaceChildren(...[coms, tags].filter(Boolean));
   };
   const toggleTag = (t) => {
     d.tags = d.tags.includes(t) ? d.tags.filter((x) => x !== t) : [...d.tags, t];
@@ -1548,25 +1581,69 @@ function openAmount({ from, to, op = null, preset = null, copy = null }) {
         }, icon('check'), 'Готово'))));
       return;
     }
-    const input = h('input', { type: 'text', maxlength: 40, placeholder: 'Новий тег, напр. подарунки', class: 'field', enterkeyhint: 'done' });
-    const list = h('div', { class: 'chips' });
-    const drawList = () => list.replaceChildren(...[...new Set([...allTags(), ...d.tags])].map((t) => h('button', {
-      type: 'button', class: `chip${d.tags.includes(t) ? ' on' : ''}`, onClick: () => { toggleTag(t); drawList(); },
-    }, `#${t}`)));
-    const addTag = () => {
-      const t = input.value.trim().replace(/^#+/, '').replace(/\s+/g, ' ');
-      if (t && !d.tags.includes(t)) d.tags.push(t);
-      input.value = '';
-      drawList();
-      paint();
+    showTags();
+  };
+
+  // Усі теги — окремим екраном поверх суми: пошук угорі, під ним вибрані, часті для цієї витрати й усі за абеткою
+  const showTags = () => {
+    const count = new Map();
+    for (const op of state.ops) for (const t of op.tags ?? []) count.set(t, (count.get(t) ?? 0) + 1);
+    const input = h('input', {
+      type: 'search', maxlength: 40, placeholder: 'Знайти чи створити тег', 'aria-label': 'Знайти чи створити тег', class: 'field', enterkeyhint: 'done',
+    });
+    const body = h('div', { class: 'tag-body' });
+    const chip = (t) => h('button', {
+      type: 'button', class: `chip${d.tags.includes(t) ? ' on' : ''}`, 'aria-pressed': String(d.tags.includes(t)),
+      onClick: () => { toggleTag(t); input.value = ''; draw(); },
+    }, `#${t}`, count.get(t) ? h('span', { class: 'tag-n' }, String(count.get(t))) : null);
+    const section = (title, tags) => (tags.length ? h('section', { class: 'tag-sec' }, h('h3', { class: 'flabel' }, title), h('div', { class: 'chips' }, tags.map(chip))) : null);
+    const draw = () => {
+      const q = normTag(input.value);
+      const all = [...new Set([...count.keys(), ...d.tags])].sort((a, b) => a.localeCompare(b, 'uk'));
+      if (q) {
+        const found = all.filter((t) => t.includes(q));
+        body.replaceChildren(...[
+          all.includes(q) ? null : h('button', { type: 'button', class: 'btn tag-new', onClick: pick }, icon('plus'), `Створити #${q}`),
+          found.length ? h('div', { class: 'chips' }, found.map(chip)) : h('p', { class: 'muted small' }, 'Серед наявних такого нема')].filter(Boolean));
+        return;
+      }
+      const picked = h('div', { class: 'chips' }, d.tags.map((t) => h('button', {
+        type: 'button', class: 'chip on', 'aria-label': `Зняти #${t}`, onClick: () => { toggleTag(t); draw(); },
+      }, `#${t}`, icon('close'))));
+      body.replaceChildren(...[
+        d.tags.length ? h('section', { class: 'tag-sec' }, h('h3', { class: 'flabel' }, 'Вибрані'), picked) : null,
+        // Короткий список видно й так — «Часто тут» лише тоді, коли тегів багато
+        all.length > 12 ? section('Часто тут', tagsFor(to).slice(0, 8)) : null,
+        section('Усі', all),
+        all.length ? null : h('p', { class: 'muted small' }, 'Тегів ще нема — напиши перший угорі.')].filter(Boolean));
     };
-    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addTag(); } });
-    drawList();
-    lower.replaceChildren(h('div', { class: 'amt-panel form' },
-      h('label', { class: 'flabel' }, 'Теги'), input, list,
-      h('div', { class: 'btn-grid' },
-        h('button', { type: 'button', class: 'btn', onClick: addTag }, icon('plus'), 'Додати'),
-        h('button', { type: 'button', class: 'btn primary', onClick: () => { addTag(); hidePanel(); } }, icon('check'), 'Готово'))));
+    // Enter чи «Створити»: наявний тег вибираємо, новий — створюємо; поле чисте, клавіатура лишається
+    const pick = () => {
+      const t = normTag(input.value);
+      if (t && !d.tags.includes(t)) toggleTag(t);
+      input.value = '';
+      draw();
+      input.focus();
+    };
+    const close = () => { d.panel = null; screen.remove(); document.removeEventListener('keydown', onKey, true); paint(); };
+    // Escape закриває лише теги, а не весь екран суми — ловимо раніше за шторку, бо фокус після тапу по чипу губиться
+    const onKey = (e) => {
+      // Екран суми закрили разом із тегами (системна «Назад») — слухач більше не потрібен
+      if (!screen.isConnected) { document.removeEventListener('keydown', onKey, true); return; }
+      if (e.key === 'Escape') { e.stopPropagation(); close(); }
+    };
+    input.addEventListener('input', draw);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); pick(); } });
+    const screen = h('div', { class: 'tag-screen', role: 'dialog', 'aria-label': 'Теги' },
+      h('div', { class: 'tag-head' },
+        h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Назад до суми', onClick: close }, icon('back')),
+        h('h2', {}, 'Теги'), input),
+      body,
+      h('div', { class: 'tag-foot' }, h('button', { type: 'button', class: 'btn primary', onClick: close }, icon('check'), 'Готово')));
+    document.addEventListener('keydown', onKey, true);
+    draw();
+    document.querySelector('.sheet.screen').append(screen);
+    screen.querySelector('.icon-btn').focus({ preventScroll: true });
   };
   const hidePanel = () => { d.panel = null; lower.replaceChildren(pad, dates); paint(); };
 
@@ -2469,7 +2546,8 @@ function viewSettings() {
           try { await fetchRates(true); toast('Курс НБУ оновлено'); render(); } catch (err) { toast(err instanceof TypeError ? 'Немає зв’язку з НБУ' : err.message); }
         },
       }, icon('refresh'), 'Курс НБУ на сьогодні'))], { fold: 'account' }),
-    settingsGroup(`Сховані монети · ${state.coins.filter((c) => c.archived).length}`, [hiddenCard()], { fold: 'hidden' }),
+    settingsGroup(`Теги · ${allTags().length}`, [tagsCard()], { fold: 'tags' }),
+    settingsGroup(`Сховані монети ·${state.coins.filter((c) => c.archived).length}`, [hiddenCard()], { fold: 'hidden' }),
     settingsGroup('Вигляд', [h('section', { class: 'card set-card' }, h('h2', {}, 'Тема'), theme)], { fold: 'look' }),
     settingsGroup('Дані', [botCard(), syncCard(),
       h('section', { class: 'card set-card' },
@@ -2509,6 +2587,54 @@ function settingsGroup(title, sections, { danger = false, fold = '' } = {}) {
   }, icon('chevron'), title);
   group.append(h('legend', {}, toggle), ...items);
   return group;
+}
+
+/** Усі теги з кількістю операцій і пошуком; тап — перейменувати, злити з іншим чи прибрати. Нема тегів — картки нема. */
+function tagsCard() {
+  const count = new Map();
+  for (const op of state.ops) for (const t of op.tags ?? []) count.set(t, (count.get(t) ?? 0) + 1);
+  if (!count.size) return null;
+  const tags = [...count.keys()].sort((a, b) => a.localeCompare(b, 'uk'));
+  const list = h('div', { class: 'chips' });
+  const find = h('input', { type: 'search', class: 'field', placeholder: 'Знайти тег', 'aria-label': 'Знайти тег' });
+  const draw = () => {
+    const q = normTag(find.value);
+    const shown = q ? tags.filter((t) => t.includes(q)) : tags;
+    list.replaceChildren(...shown.map((t) => h('button', { type: 'button', class: 'chip', onClick: () => editTag(t, count.get(t)) }, `#${t} · ${count.get(t)}`)),
+      ...(shown.length ? [] : [h('p', { class: 'muted small' }, 'Такого тегу нема')]));
+  };
+  find.addEventListener('input', draw);
+  draw();
+  return h('section', { class: 'card set-card' },
+    h('p', { class: 'muted small' }, 'Тап по тегу — перейменувати, злити з іншим чи прибрати з усіх операцій. Великі літери й зайві пробіли прибираю сам.'),
+    tags.length > 12 ? find : null, list);
+}
+
+/** Шторка одного тегу: нова назва (така, що вже є, — злиття) чи «Прибрати тег»; операції лишаються. */
+function editTag(t, n) {
+  const input = h('input', { type: 'text', maxlength: 40, value: t, class: 'field', 'aria-label': 'Назва тегу', enterkeyhint: 'done' });
+  const note = h('p', { class: 'muted small' });
+  const ok = h('button', { type: 'button', class: 'btn primary' }, icon('check'), h('span', {}, 'Зберегти'));
+  const paintNote = () => {
+    const to = normTag(input.value);
+    const into = to && to !== t && allTags().includes(to);
+    note.textContent = into ? `#${to} уже є — теги зіллються в один` : '';
+    ok.lastChild.textContent = into ? `Злити з #${to}` : 'Зберегти';
+  };
+  const apply = async () => {
+    const to = normTag(input.value);
+    closeSheet();
+    if (to && to !== t) await retag(t, to);
+  };
+  input.addEventListener('input', paintNote);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(); } });
+  ok.addEventListener('click', apply);
+  sheet(`#${t}`, h('div', { class: 'form' },
+    h('p', {}, `У ${n} ${plural(n, ['операції', 'операціях', 'операціях'])}.`),
+    h('label', { class: 'flabel' }, 'Назва'), input, note,
+    h('div', { class: 'btn-grid' },
+      h('button', { type: 'button', class: 'btn danger', onClick: async () => { closeSheet(); await retag(t, ''); } }, icon('close'), 'Прибрати тег'),
+      ok)));
 }
 
 /** Сховані монети: повернути (сховав помилково) чи видалити разом з операціями. Нема схованих — картки нема. */
@@ -2887,7 +3013,7 @@ function planCsv(rows, at) {
     const dst = pick(toName, CSV_ENDS[t][1], Csv.parseCurrency(cell(r, 'currencyTo')) ?? (amountTo ? null : cur));
     const op = {
       id: uid(), from: src.id, to: dst.id, amount, date, created: Date.now() + i,
-      tags: cell(r, 'tags').split(/[,;]|\s+(?=#)/).map((x) => x.trim().replace(/^#+/, '')).filter(Boolean),
+      tags: normTags(cell(r, 'tags').split(/[,;]|\s+(?=#)/)),
       comment: cell(r, 'comment').slice(0, 200),
     };
     if (src.currency !== dst.currency) op.amountTo = amountTo ?? M.round2(amount * rate(src.currency) / rate(dst.currency));
@@ -3664,6 +3790,8 @@ async function init() {
     const demoOps = state.ops.filter((o) => o.demo).map((o) => o.id);
     const demoCoins = state.coins.filter((c) => c.demo).map((c) => c.id);
     if (demoOps.length || demoCoins.length) await save({ ops: { del: demoOps }, coins: { del: demoCoins } }, { redraw: false });
+    // Теги з великої чи з пробілом (до 0.2.18, з таблиці, з іншого телефона) — в одне написання, двійники зливаються
+    await fixTags();
   } catch (err) {
     $('view').replaceChildren(h('p', { class: 'error' }, `Не вдалося відкрити сховище браузера: ${err.message}`));
     return;
