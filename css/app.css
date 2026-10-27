@@ -232,11 +232,11 @@ a { color: var(--brand-text); }
 .coin.drop-over { z-index: 3; }
 .coin.drop-over .coin-face { transform: scale(1.35); animation: drop-pulse .9s ease-in-out infinite; }
 @keyframes drop-pulse { 50% { transform: scale(1.27); } }
-/* і назва цілі — повністю, крупніше й поверх сусідів (!important — перебити зменшення з fitNames) */
+/* і назва цілі — повністю, крупніше, поверх сусідів і зеленим, як обідок цілі (!important — перебити зменшення з fitNames) */
 .coin-name { transition: transform .15s ease; }
 .coin.drop-over .coin-name {
   position: relative; z-index: 1; max-width: none; overflow: visible; padding: 0 6px; border-radius: 8px;
-  background: var(--surface); color: var(--text); font-weight: 600; font-size: clamp(11px, 3.2vw, 13px) !important;
+  background: var(--surface); box-shadow: 0 0 0 1.5px var(--brand); color: var(--brand-text); font-weight: 600; font-size: clamp(11px, 3.2vw, 13px) !important;
   transform: translateY(8px) scale(1.3);
 }
 /* відгук пальцю й «підскок» монети, у якої змінилась сума */
