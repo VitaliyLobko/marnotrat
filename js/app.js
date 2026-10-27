@@ -7,6 +7,7 @@ import * as Bot from './bot.js';
 import { cursors, exchange } from './cloud.js';
 import { CHANGES, changesSince } from './changes.js';
 import * as Csv from './csv.js';
+import { initLock, lockOn, lockDelay, lockAvailable, enableLock, disableLock, setLockDelay, LOCK_DELAYS } from './lock.js';
 import { $, h, icon, hasIcon, toast, sheet, closeSheet, chips, swipeStep, vibrate } from './ui.js';
 
 const state = { coins: [], ops: [], meta: [] };
@@ -2479,6 +2480,33 @@ function editCoin(orig, kind = orig?.kind) {
 
 const THEMES = [['auto', 'Як у системі'], ['light', 'Світла'], ['dark', 'Темна']];
 
+/** «Вхід за відбитком»: увімкнути, через скільки блокувати у фоні, вимкнути з підтвердженням. */
+function lockCard() {
+  const body = h('div', {});
+  const act = (fn, done) => async () => {
+    try {
+      await fn();
+      toast(done);
+    } catch (err) {
+      if (err?.name !== 'NotAllowedError') toast(`Помилка: ${err?.message || err}`);
+    }
+    render();
+  };
+  if (lockOn()) {
+    body.append(
+      h('p', { class: 'muted small' }, 'Блокувати після згортання:'),
+      chips(LOCK_DELAYS.map((m) => [String(m), m ? `${m} хв` : 'Одразу']), String(lockDelay()), (v) => setLockDelay(Number(v))),
+      h('div', { class: 'btn-grid' }, h('button', { type: 'button', class: 'btn', onClick: act(disableLock, 'Вхід за відбитком вимкнено') }, 'Вимкнути')));
+  } else {
+    lockAvailable().then((ok) => body.append(ok
+      ? h('div', { class: 'btn-grid' }, h('button', { type: 'button', class: 'btn primary', onClick: act(enableLock, 'Вхід за відбитком увімкнено') }, 'Увімкнути'))
+      : h('p', { class: 'muted small' }, 'На цьому пристрої немає відбитка, обличчя чи PIN-коду, які браузер може перевірити.')));
+  }
+  return h('section', { class: 'card set-card' }, h('h2', {}, 'Вхід за відбитком'),
+    h('p', { class: 'muted small' }, 'Застосунок відкривається відбитком, обличчям або PIN-кодом телефона — лише на цьому пристрої. Це захист від чужих очей, дані не шифруються.'),
+    body);
+}
+
 function applyTheme() {
   const pref = recall('theme') || 'auto';
   const light = pref === 'light' || (pref === 'auto' && matchMedia('(prefers-color-scheme: light)').matches);
@@ -2549,7 +2577,7 @@ function viewSettings() {
     settingsGroup(`Теги · ${allTags().length}`, [tagsCard()], { fold: 'tags' }),
     settingsGroup(`Сховані монети ·${state.coins.filter((c) => c.archived).length}`, [hiddenCard()], { fold: 'hidden' }),
     settingsGroup('Вигляд', [h('section', { class: 'card set-card' }, h('h2', {}, 'Тема'), theme)], { fold: 'look' }),
-    settingsGroup('Дані', [botCard(), syncCard(),
+    settingsGroup('Дані', [botCard(), syncCard(), lockCard(),
       h('section', { class: 'card set-card' },
         h('h2', {}, 'Копія у файл'),
         h('p', { class: 'muted small' }, 'Файл JSON з усіма даними — про всяк випадок; його можна відновити на іншому телефоні.'),
@@ -3776,6 +3804,7 @@ function registerWorker() {
 
 async function init() {
   applyTheme();
+  initLock({ key: 'marnotrat:lock', name: 'Марнотрат', icon: 'icons/icon-192.png' });
   matchMedia('(prefers-color-scheme: light)').addEventListener('change', applyTheme);
   registerWorker();
   try {
