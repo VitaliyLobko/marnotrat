@@ -228,8 +228,17 @@ a { color: var(--brand-text); }
 /* перетягування */
 .dragging .coin:not(.drop-ok):not(.drag-src) { opacity: .35; }
 .coin.drop-ok .coin-face { box-shadow: 0 0 0 3px var(--surface), 0 0 0 5px var(--brand); }
-.coin.drop-over .coin-face { transform: scale(1.12); animation: drop-pulse .9s ease-in-out infinite; }
-@keyframes drop-pulse { 50% { transform: scale(1.04); } }
+/* ціль під пальцем помітно росте — видно з-під пальця й копії монети */
+.coin.drop-over { z-index: 3; }
+.coin.drop-over .coin-face { transform: scale(1.35); animation: drop-pulse .9s ease-in-out infinite; }
+@keyframes drop-pulse { 50% { transform: scale(1.27); } }
+/* і назва цілі — повністю, крупніше й поверх сусідів (!important — перебити зменшення з fitNames) */
+.coin-name { transition: transform .15s ease; }
+.coin.drop-over .coin-name {
+  position: relative; z-index: 1; max-width: none; overflow: visible; padding: 0 6px; border-radius: 8px;
+  background: var(--surface); color: var(--text); font-weight: 600; font-size: clamp(11px, 3.2vw, 13px) !important;
+  transform: translateY(8px) scale(1.3);
+}
 /* відгук пальцю й «підскок» монети, у якої змінилась сума */
 .coin:not(.coin-ghost) .coin-face:active { transform: scale(.93); }
 .coin.bump .coin-face { animation: bump .45s ease-out; }
