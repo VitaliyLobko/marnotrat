@@ -1556,12 +1556,13 @@ function openAmount({ from, to, op = null, preset = null, copy = null }) {
       return;
     }
     if (kind === 'comment') {
-      const ta = h('textarea', { rows: 2, maxlength: 200, placeholder: 'Наприклад: Екофлоу', class: 'field' }, d.comment);
+      // Пишемо одразу: ✓ «Зберегти» вгорі можна натиснути, не закривши панель «Готово»
+      const ta = h('textarea', { rows: 2, maxlength: 200, placeholder: 'Наприклад: Екофлоу', class: 'field', onInput: () => { d.comment = ta.value; } }, d.comment);
       // Гарантія: дата кінця або швидко — роки від дати покупки
-      const until = h('input', { type: 'date', class: 'field', value: d.warranty, min: d.date, 'aria-label': 'Гарантія до' });
+      const until = h('input', { type: 'date', class: 'field', value: d.warranty, min: d.date, 'aria-label': 'Гарантія до', onChange: () => { d.warranty = until.value; } });
       const years = (n) => M.addDays(`${Number(d.date.slice(0, 4)) + n}${d.date.slice(4)}`, 0);
       const quick = h('div', { class: 'chips' }, [[1, '1 рік'], [2, '2 роки'], [3, '3 роки']].map(([n, label]) => h('button', {
-        type: 'button', class: 'chip', onClick: () => { until.value = years(n); },
+        type: 'button', class: 'chip', onClick: () => { until.value = years(n); d.warranty = until.value; },
       }, label)));
       const photos = h('div', { class: 'photo-row' });
       const drawPhotos = () => photos.replaceChildren(
