@@ -16,6 +16,7 @@ const ASSETS = [
   './js/drive-files.js',
   './js/bot-key.js',
   './js/bot.js',
+  './js/widget.js',
   './js/cloud.js',
   './js/journal.js',
   './js/changes.js',

@@ -4,6 +4,7 @@ import { slAvailable, readJournal, addRecord, patchRecord, removeRecord, unlinkJ
 import * as M from './model.js';
 import * as Sync from './sync.js';
 import * as Bot from './bot.js';
+import * as Widget from './widget.js';
 import { cursors, exchange } from './cloud.js';
 import { CHANGES, changesSince } from './changes.js';
 import * as Csv from './csv.js';
@@ -427,16 +428,109 @@ function refreshChip() {
 // Сьогоднішні витрати й залишок бюджету — для «Сьогодні» в Хобі-плані на цьому ж пристрої (спільний localStorage сайту)
 const MONEY_SHARE = 'vitaliylobko:money-today';
 
-function shareMoney() {
+/** Витрати за сьогодні в гривнях. */
+function todaySpent() {
   const today = M.ymd();
   let spent = 0;
   for (const op of state.ops) {
     if (op.date !== today || opType(op) !== 'expense') continue;
     spent += toUah(amountIn(op), coinOr(op.to).currency);
   }
+  return spent;
+}
+
+function shareMoney() {
   const plan = planTotal();
-  const v = JSON.stringify({ date: today, spent: M.round2(spent), left: plan ? M.round2(plan - totals(currentPeriod()).expense) : null });
+  const v = JSON.stringify({ date: M.ymd(), spent: M.round2(todaySpent()), left: plan ? M.round2(plan - totals(currentPeriod()).expense) : null });
   try { if (localStorage.getItem(MONEY_SHARE) !== v) localStorage.setItem(MONEY_SHARE, v); } catch { /* приватний режим */ }
+}
+
+// ---------- віджет на Android ----------
+
+/**
+ * Шапка для віджета: те, що на головній, і трохи більше — день періоду, гроші на день, сьогодні, заплановане.
+ * at — найновіша зміна даних: телефон, що ще не підтягнув чужі операції, не перетре на сервері свіжішу шапку.
+ */
+function widgetHead() {
+  const cur = currentPeriod();
+  const [from, to] = periodRange(cur);
+  const dayNo = (d) => Math.round((M.parseYmd(d) - M.parseYmd(from)) / 864e5) + 1;
+  const plan = planTotal();
+  const p = plannedLeft();
+  const r = M.round2;
+  let at = 0;
+  for (const list of [state.ops, state.coins, state.meta]) for (const x of list) at = Math.max(at, Number(x.updated) || 0);
+  const month = M.monthTitle(cur).split(' ')[0];
+  return {
+    at,
+    period: startDay() === 1 ? month[0].toUpperCase() + month.slice(1) : periodTitle(cur).replace(/\.\d{4}$/, ''),
+    day: dayNo(M.ymd()), days: dayNo(to),
+    balance: r(totalBalance()), expense: r(totals(cur).expense), today: r(todaySpent()),
+    plan: r(plan), left: r(plan - totals(cur).expense), perDay: perDayLeft()?.perDay ?? 0,
+    planned: r(p.sum), plannedN: p.n, next: p.next,
+  };
+}
+
+/** Заплановані витрати до кінця періоду разом із простроченими непроведеними: сума в гривнях, скільки, найближча. */
+function plannedLeft() {
+  const today = M.ymd();
+  const end = periodRange(currentPeriod())[1];
+  const doneBy = new Map();
+  for (const o of state.ops) {
+    if (o.fromRule == null) continue;
+    if (!doneBy.has(o.fromRule)) doneBy.set(o.fromRule, new Set());
+    doneBy.get(o.fromRule).add(o.ruleDate);
+  }
+  let sum = 0;
+  let n = 0;
+  let next = null;
+  for (const rule of state.ops) {
+    if (!rule.repeat?.every || opType(rule) !== 'expense') continue;
+    const done = doneBy.get(rule.id) ?? new Set();
+    const skip = new Set(rule.repeat.skip ?? []);
+    const dates = M.repeatDates(rule.date, rule.repeat.every, rule.repeat.until, end).filter((x) => x <= end && !done.has(x) && !skip.has(x));
+    // Прострочені — як у «В планах» стрічки: не більше PLAN_BACKLOG останніх
+    const due = dates.filter((x) => x <= today).slice(-PLAN_BACKLOG);
+    const v = expenseUah(rule);
+    for (const date of [...due, ...dates.filter((x) => x > today)]) {
+      sum += v;
+      n += 1;
+      if (!next || date < next.date) next = { date, name: coinOr(rule.to).name, v: M.round2(v) };
+    }
+  }
+  return { sum, n, next };
+}
+
+/** Звична пара монет для кнопок віджета «Витрата» й «Дохід» — найчастіша за 90 днів; нема — перші за порядком. */
+function usualPair(type) {
+  const since = M.addDays(M.ymd(), -90);
+  const live = (id) => state.coins.some((c) => c.id === id && !c.archived);
+  const count = new Map();
+  for (const op of state.ops) {
+    if (op.date < since || opType(op) !== type || !live(op.from) || !live(op.to)) continue;
+    const k = `${op.from}\n${op.to}`;
+    count.set(k, (count.get(k) ?? 0) + 1);
+  }
+  const best = [...count].sort((a, b) => b[1] - a[1])[0];
+  if (best) {
+    const [from, to] = best[0].split('\n');
+    return { from, to };
+  }
+  const [src, dst] = type === 'income' ? [coinsOf('income')[0], coinsOf('account')[0]] : [coinsOf('account')[0], coinsOf('expense')[0]];
+  return src && dst ? { from: src.id, to: dst.id } : null;
+}
+
+/** «Віджет на головний екран»: є застосунок — передати адресу й ключ, немає — Chrome качає APK. */
+function widgetCard() {
+  const link = Widget.setupLink();
+  return h('section', { class: 'card set-card' },
+    h('h2', {}, 'Віджет на головний екран'),
+    h('p', { class: 'muted small' }, link
+      ? 'Баланс, витрати, скільки лишилось і можна на день — на головному екрані Android, без відкриття застосунку. Перший тап завантажить застосунок віджета (дозволь Chrome встановлення), другий — підключить його й запропонує додати віджет.'
+      : 'Віджет бере цифри з бази на сервері — спершу ввімкни синхронізацію вище.'),
+    link ? h('div', { class: 'btn-grid' },
+      h('a', { class: 'btn primary', href: link }, icon('smartphone'), 'Встановити віджет'),
+      h('a', { class: 'btn', href: Widget.APK_URL }, icon('archive'), 'Завантажити APK')) : null);
 }
 
 // ---------- підрахунки ----------
@@ -2578,7 +2672,7 @@ function viewSettings() {
     settingsGroup(`Теги · ${allTags().length}`, [tagsCard()], { fold: 'tags' }),
     settingsGroup(`Сховані монети ·${state.coins.filter((c) => c.archived).length}`, [hiddenCard()], { fold: 'hidden' }),
     settingsGroup('Вигляд', [h('section', { class: 'card set-card' }, h('h2', {}, 'Тема'), theme)], { fold: 'look' }),
-    settingsGroup('Дані', [botCard(), syncCard(), lockCard(),
+    settingsGroup('Дані', [botCard(), widgetCard(), syncCard(), lockCard(),
       h('section', { class: 'card set-card' },
         h('h2', {}, 'Копія у файл'),
         h('p', { class: 'muted small' }, 'Файл JSON з усіма даними — про всяк випадок; його можна відновити на іншому телефоні.'),
@@ -3748,6 +3842,7 @@ function fitNames() {
 
 function render() {
   shareMoney();
+  Widget.scheduleWidget(widgetHead);
   topbar();
   // Ряд рахунків прилипає під шапку — їй висота з вирізом екрана, тож міряємо, а не вгадуємо
   document.documentElement.style.setProperty('--topbar-h', `${$('topbar').offsetHeight}px`);
@@ -3756,7 +3851,14 @@ function render() {
 }
 
 function route() {
-  const [key, arg] = location.hash.slice(1).split('/');
+  let [key, arg] = location.hash.slice(1).split('/');
+  // Кнопки віджета Android: #add/expense, #add/income — екран суми зі звичними монетами поверх головної
+  if (key === 'add') {
+    const pair = usualPair(arg === 'income' ? 'income' : 'expense');
+    history.replaceState(null, '', '#main');
+    [key, arg] = ['main', undefined];
+    if (pair) setTimeout(() => openAmount(pair));
+  }
   const next = VIEWS[key] ? key : 'main';
   const changed = next !== view || (next === 'feed' && (arg ?? null) !== feedCoin);
   view = next;
@@ -3847,7 +3949,7 @@ async function init() {
   showWhatsNew();
   document.addEventListener('pointerup', () => { if (Sync.syncOn() && !Sync.tokenValid()) runSync({ gesture: true }); }, true);
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') { runSync(); scheduleCloud(300); Bot.scheduleBot(botPayload, 1500); }
+    if (document.visibilityState === 'visible') { runSync(); scheduleCloud(300); Bot.scheduleBot(botPayload, 1500); Widget.scheduleWidget(widgetHead); }
   });
   addEventListener('online', () => { refreshChip(); scheduleCloud(500); });
   addEventListener('offline', refreshChip);
