@@ -3,6 +3,7 @@
   "short_name": "Марнотрат",
   "description": "Облік витрат монетками: дохід — на рахунок, рахунок — на витрату",
   "lang": "uk",
+  "id": "./app",
   "start_url": "./",
   "scope": "./",
   "display": "fullscreen",
