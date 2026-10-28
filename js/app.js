@@ -428,12 +428,11 @@ function refreshChip() {
 // Сьогоднішні витрати й залишок бюджету — для «Сьогодні» в Хобі-плані на цьому ж пристрої (спільний localStorage сайту)
 const MONEY_SHARE = 'vitaliylobko:money-today';
 
-/** Витрати за сьогодні в гривнях. */
-function todaySpent() {
-  const today = M.ymd();
+/** Витрати за день (сьогодні, якщо не вказано) в гривнях. */
+function todaySpent(date = M.ymd()) {
   let spent = 0;
   for (const op of state.ops) {
-    if (op.date !== today || opType(op) !== 'expense') continue;
+    if (op.date !== date || opType(op) !== 'expense') continue;
     spent += toUah(amountIn(op), coinOr(op.to).currency);
   }
   return spent;
@@ -468,6 +467,11 @@ function widgetHead() {
     balance: r(totalBalance()), expense: r(totals(cur).expense), today: r(todaySpent()),
     plan: r(plan), left: r(plan - totals(cur).expense), perDay: perDayLeft()?.perDay ?? 0,
     planned: r(p.sum), plannedN: p.n, next: p.next,
+    // Стовпчики тижня у віджеті 4×2: сім днів, останній — сьогодні
+    week: [...Array(7).keys()].map((i) => {
+      const date = M.addDays(M.ymd(), i - 6);
+      return { date, v: r(todaySpent(date)) };
+    }),
   };
 }
 
