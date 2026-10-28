@@ -523,7 +523,12 @@ a { color: var(--brand-text); }
 .settings-group.closed { padding: 0 16px; border-width: 1px 0 0; border-radius: 0; background: none; box-shadow: none; }
 .settings-group.closed > legend { background: var(--bg); }
 .settings-group.closed > :not(legend) { display: none; }
-.rate-row { display: grid; grid-template-columns: 60px 1fr; align-items: center; gap: 10px; }
+.rate-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.rate-row > label { display: flex; align-items: center; gap: 10px; }
+.rate-row > label > b { flex: none; width: 1em; font-size: 18px; text-align: center; }
+.rate-row .field { min-width: 0; }
+.set-card .row-between { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.set-card .row-between > .btn { flex: none; }
 .error { padding: 24px 16px; color: var(--over-ink); }
 /* на екрані суми тост — над кнопками дат */
 .layer-open .toast { bottom: calc(76px + env(safe-area-inset-bottom)); }
@@ -572,11 +577,16 @@ a { color: var(--brand-text); }
 .about-avatar { flex: none; width: 64px; height: 64px; border-radius: 50%; object-fit: cover;
   background: var(--surface-2); box-shadow: 0 0 0 1px var(--line); }
 .about-more { margin-top: 6px; border-top: 1px solid var(--line); }
-.about-more > summary { padding: 8px 0; color: var(--brand-text); font-size: 13px; font-weight: 700; cursor: pointer; list-style: none; }
+.about-more > summary { display: flex; align-items: center; gap: 4px; min-height: 40px; padding: 0; color: var(--brand-text); font-size: 13px; font-weight: 700; cursor: pointer; list-style: none; }
 .about-more > summary::-webkit-details-marker { display: none; }
 .about-more > summary::after { content: ' ›'; }
 .about-more[open] > summary::after { content: ' ⌄'; }
 .about-more p { margin: 0 0 8px; line-height: 1.45; }
+/* «Докладніше» в картках налаштувань — тихе посилання під вмістом, без лінії: пояснення потрібні раз */
+.about-more.set-more { margin-top: -4px; border-top: 0; }
+.about-more.set-more > summary { min-height: 36px; font-size: 13px; font-weight: 600; }
+.about-more.set-more[open] > summary { margin-bottom: 2px; }
+.set-card > div > p { margin: 0; }
 .about-steps { counter-reset: st; display: grid; gap: 8px; margin: 4px 0 10px; padding: 0; list-style: none; font-size: 13px; color: var(--text-2); }
 .about-steps > li { position: relative; padding-left: 32px; line-height: 1.45; }
 .about-steps > li::before {
