@@ -330,7 +330,7 @@ const cloud = { timer: 0, busy: false, again: false, error: '' };
 function scheduleCloud(ms = 2000) {
   if (!Bot.botConfig()) return;
   clearTimeout(cloud.timer);
-  cloud.timer = setTimeout(() => runCloud(), ms);
+  cloud.timer = setTimeout(() => { cloud.timer = 0; runCloud(); }, ms);
 }
 
 /** Один обмін з базою бота. Без мережі — тихо: змінене поїде наступного разу (позначки не зсуваються). */
@@ -462,65 +462,6 @@ function shareMoney() {
 }
 
 // ---------- віджет на Android ----------
-
-/**
- * Шапка для віджета: те, що на головній, і трохи більше — день періоду, гроші на день, сьогодні, заплановане.
- * at — найновіша зміна даних: телефон, що ще не підтягнув чужі операції, не перетре на сервері свіжішу шапку.
- */
-function widgetHead() {
-  const cur = currentPeriod();
-  const [from, to] = periodRange(cur);
-  const dayNo = (d) => Math.round((M.parseYmd(d) - M.parseYmd(from)) / 864e5) + 1;
-  const plan = planTotal();
-  const p = plannedLeft();
-  const r = M.round2;
-  let at = 0;
-  for (const list of [state.ops, state.coins, state.meta]) for (const x of list) at = Math.max(at, Number(x.updated) || 0);
-  const month = M.monthTitle(cur).split(' ')[0];
-  return {
-    at,
-    period: startDay() === 1 ? month[0].toUpperCase() + month.slice(1) : periodTitle(cur).replace(/\.\d{4}$/, ''),
-    day: dayNo(M.ymd()), days: dayNo(to),
-    balance: r(totalBalance()), expense: r(totals(cur).expense), today: r(todaySpent()),
-    plan: r(plan), left: r(plan - totals(cur).expense), perDay: perDayLeft()?.perDay ?? 0,
-    planned: r(p.sum), plannedN: p.n, next: p.next,
-    // Стовпчики тижня у віджеті 4×2: сім днів, останній — сьогодні
-    week: [...Array(7).keys()].map((i) => {
-      const date = M.addDays(M.ymd(), i - 6);
-      return { date, v: r(todaySpent(date)) };
-    }),
-  };
-}
-
-/** Заплановані витрати до кінця періоду разом із простроченими непроведеними: сума в гривнях, скільки, найближча. */
-function plannedLeft() {
-  const today = M.ymd();
-  const end = periodRange(currentPeriod())[1];
-  const doneBy = new Map();
-  for (const o of state.ops) {
-    if (o.fromRule == null) continue;
-    if (!doneBy.has(o.fromRule)) doneBy.set(o.fromRule, new Set());
-    doneBy.get(o.fromRule).add(o.ruleDate);
-  }
-  let sum = 0;
-  let n = 0;
-  let next = null;
-  for (const rule of state.ops) {
-    if (!rule.repeat?.every || opType(rule) !== 'expense') continue;
-    const done = doneBy.get(rule.id) ?? new Set();
-    const skip = new Set(rule.repeat.skip ?? []);
-    const dates = M.repeatDates(rule.date, rule.repeat.every, rule.repeat.until, end).filter((x) => x <= end && !done.has(x) && !skip.has(x));
-    // Прострочені — як у «В планах» стрічки: не більше PLAN_BACKLOG останніх
-    const due = dates.filter((x) => x <= today).slice(-PLAN_BACKLOG);
-    const v = expenseUah(rule);
-    for (const date of [...due, ...dates.filter((x) => x > today)]) {
-      sum += v;
-      n += 1;
-      if (!next || date < next.date) next = { date, name: coinOr(rule.to).name, v: M.round2(v) };
-    }
-  }
-  return { sum, n, next };
-}
 
 /** Звична пара монет для кнопок віджета «Витрата» й «Дохід» — найчастіша за 90 днів; нема — перші за порядком. */
 function usualPair(type) {
@@ -3874,7 +3815,6 @@ function fitNames() {
 
 function render() {
   shareMoney();
-  Widget.scheduleWidget(widgetHead);
   topbar();
   // Ряд рахунків прилипає під шапку — їй висота з вирізом екрана, тож міряємо, а не вгадуємо
   document.documentElement.style.setProperty('--topbar-h', `${$('topbar').offsetHeight}px`);
@@ -3981,7 +3921,9 @@ async function init() {
   showWhatsNew();
   document.addEventListener('pointerup', () => { if (Sync.syncOn() && !Sync.tokenValid()) runSync({ gesture: true }); }, true);
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') { runSync(); scheduleCloud(300); Bot.scheduleBot(botPayload, 1500); Widget.scheduleWidget(widgetHead); }
+    if (document.visibilityState === 'visible') { runSync(); scheduleCloud(300); Bot.scheduleBot(botPayload, 1500); }
+    // Згорнули одразу після запису — обмін не чекає своїх 2 с: інакше сервер (і віджет) дізнались би аж при наступному відкритті
+    else if (cloud.timer) { clearTimeout(cloud.timer); cloud.timer = 0; runCloud(); }
   });
   addEventListener('online', () => { refreshChip(); scheduleCloud(500); });
   addEventListener('offline', refreshChip);
