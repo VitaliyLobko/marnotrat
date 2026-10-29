@@ -55,9 +55,9 @@ def render(size, k):
 
 def main():
     ICONS.mkdir(exist_ok=True)
-    render(192, 1).save(ICONS / 'icon-192.png')
-    render(512, 1).save(ICONS / 'icon-512.png')
-    render(512, MASK).save(ICONS / 'icon-maskable-512.png')
+    render(192, 1).save(ICONS / 'icon-192-v2.png')
+    render(512, 1).save(ICONS / 'icon-512-v2.png')
+    render(512, MASK).save(ICONS / 'icon-maskable-512-v2.png')
     render(180, 1).save(ICONS / 'apple-touch-icon.png')
 
 

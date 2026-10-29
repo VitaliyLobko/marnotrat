@@ -25,9 +25,9 @@ const ASSETS = [
   './js/ui.js',
   './js/icons.js',
   './js/icons-lucide.js',
-  './icons/icon-192.png',
-  './icons/icon-512.png',
-  './icons/icon-maskable-512.png',
+  './icons/icon-192-v2.png',
+  './icons/icon-512-v2.png',
+  './icons/icon-maskable-512-v2.png',
   './icons/apple-touch-icon.png',
   './icons/author.jpg',
 ];

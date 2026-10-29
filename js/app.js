@@ -3722,7 +3722,7 @@ function openMenu() {
     icon(a.ico), h('span', { class: 'menu-label' }, a.text), icon('next')));
   const close = sheet('Меню', h('nav', { class: 'menu' },
     h('div', { class: 'menu-head' },
-      h('img', { class: 'menu-logo', src: './icons/icon-192.png', alt: '', width: 44, height: 44 }),
+      h('img', { class: 'menu-logo', src: './icons/icon-192-v2.png', alt: '', width: 44, height: 44 }),
       h('span', {}, h('b', {}, 'Марнотрат'), h('span', {}, `на рахунках ${M.money(Math.round(totalBalance()))}`))),
     remind.length ? h('div', { class: 'menu-group remind' }, h('p', { class: 'menu-cap' }, 'Нагадування'), remind) : null,
     MENU.map(([title, items]) => h('div', { class: 'menu-group' }, h('p', { class: 'menu-cap' }, title), items.map(item))),
@@ -3879,7 +3879,7 @@ function registerWorker() {
 
 async function init() {
   applyTheme();
-  initLock({ key: 'marnotrat:lock', name: 'Марнотрат', icon: 'icons/icon-192.png' });
+  initLock({ key: 'marnotrat:lock', name: 'Марнотрат', icon: 'icons/icon-192-v2.png' });
   matchMedia('(prefers-color-scheme: light)').addEventListener('change', applyTheme);
   registerWorker();
   try {
