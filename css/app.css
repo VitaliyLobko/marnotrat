@@ -187,6 +187,9 @@ a { color: var(--brand-text); }
   touch-action: none;
   transition: transform .15s ease, box-shadow .15s ease, opacity .15s ease;
 }
+/* кільце цілі доливається плавно — для цього --fill зареєстроване число; inherits — його читає .coin-fill усередині */
+@property --fill { syntax: '<number>'; inherits: true; initial-value: 0; }
+.k-goal .coin-face { transition: transform .15s ease, box-shadow .15s ease, opacity .15s ease, --fill .6s cubic-bezier(.2, .8, .2, 1); }
 /* витрату гортають в обидва боки; рахунок, дохід і ціль — лише вбік: рух униз чи навскіс уже перетягування */
 .k-expense .coin-face { touch-action: pan-x pan-y; }
 .k-income .coin-face, .k-account .coin-face, .k-goal .coin-face, .k-debt .coin-face { touch-action: pan-x; }
@@ -194,7 +197,11 @@ a { color: var(--brand-text); }
 /* іконка — близько половини монети, тонкою лінією */
 .coin-face .coin-ico { width: 50%; }
 .coin-face .coin-ico svg { width: 100%; height: auto; stroke-width: 1.6; }
-.coin-fill { position: absolute; left: 0; right: 0; bottom: 0; height: calc(var(--fill, 0) * 100%); background: var(--ok); }
+/* рівень витрати — стиском знизу, не висотою: доливається на відеокарті, без перерахунку розкладки */
+.coin-fill {
+  position: absolute; inset: 0; background: var(--ok);
+  transform: scaleY(var(--fill, 0)); transform-origin: bottom; transition: transform .6s cubic-bezier(.2, .8, .2, 1);
+}
 .k-income .coin-face { background: var(--inc); }
 .k-account .coin-face { background: var(--acc); }
 /* ціль: сірий обідок заповнюється бірюзовим по колу, всередині — бірюзова монета */
@@ -246,7 +253,10 @@ a { color: var(--brand-text); }
 /* ціль «ловить» монету, яку на неї кинули */
 .coin-face.catch { animation: catch .32s ease-out; }
 @keyframes catch { 0% { transform: scale(1.12); } 45% { transform: scale(.9); } 100% { transform: scale(1); } }
-@media (prefers-reduced-motion: reduce) { .coin .coin-face, .coin.drop-over .coin-face, .coin.bump .coin-face, .coin-face.catch { animation: none; transition: none; } }
+/* витрата щойно перейшла за бюджет — монета здригається, коли рівень уже долився */
+.coin.alarm { animation: alarm .4s ease-in-out .5s; }
+@keyframes alarm { 20%, 60% { translate: -4px 0; } 40%, 80% { translate: 4px 0; } }
+@media (prefers-reduced-motion: reduce) { .coin .coin-face, .coin.drop-over .coin-face, .coin.bump .coin-face, .coin-face.catch, .coin.alarm, .coin-fill { animation: none; transition: none; } }
 .coin.drag-src .coin-face { opacity: .4; }
 .coin-ghost {
   position: fixed; z-index: 60; pointer-events: none; margin: 0;
@@ -283,6 +293,30 @@ a { color: var(--brand-text); }
 .swipe-row.to-left .swipe-bg.del, .swipe-row.to-right .swipe-bg.edit { display: flex; }
 .swipe-row.armed .swipe-bg.del { background: var(--over); }
 .swipe-row.armed .swipe-bg.edit { background: var(--brand); }
+/* щойно записана чи змінена операція — на мить підсвічена */
+.op-row.flash { animation: row-flash 1.2s ease-out; }
+@keyframes row-flash { from { background-color: color-mix(in srgb, var(--brand) 22%, var(--surface)); } }
+@media (prefers-reduced-motion: reduce) { .op-row.flash { animation: none; } }
+
+/* перехід між екранами: вглиб — новий заїжджає справа, назад — старий від'їжджає вправо; шапка лише змінюється на місці */
+#topbar { view-transition-name: topbar; }
+#toast { view-transition-name: toast; }
+::view-transition-group(root) { animation-duration: .26s; }
+::view-transition-old(root) { animation: vt-old .26s cubic-bezier(.2, .8, .2, 1) both; }
+::view-transition-new(root) { animation: vt-new .26s cubic-bezier(.2, .8, .2, 1) both; }
+.vt-back::view-transition-old(root) { z-index: 1; animation-name: vt-back-old; }
+.vt-back::view-transition-new(root) { animation-name: vt-back-new; }
+::view-transition-old(topbar), ::view-transition-new(topbar) { animation-duration: .2s; }
+@keyframes vt-old { to { transform: translateX(-25%); opacity: .4; } }
+@keyframes vt-new { from { transform: translateX(100%); } }
+@keyframes vt-back-old { to { transform: translateX(100%); } }
+@keyframes vt-back-new { from { transform: translateX(-25%); opacity: .4; } }
+/* тап по монеті: вона розростається й тане, стрічка проступає з-під неї */
+.vt-coin::view-transition-old(root) { animation-name: fade-out; }
+.vt-coin::view-transition-new(root) { animation-name: vt-coin-new; }
+::view-transition-old(coin-hero) { animation: vt-hero .3s ease-in both; }
+@keyframes vt-coin-new { from { transform: scale(.94); opacity: 0; } }
+@keyframes vt-hero { to { transform: scale(4); opacity: 0; } }
 .op-ends { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .op-from { color: var(--muted); font-size: 14px; }
 .op-to { font-size: 17px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
@@ -363,7 +397,19 @@ a { color: var(--brand-text); }
   border-radius: 0; display: flex; flex-direction: column; animation: drawer-in .18s ease-out;
 }
 @keyframes drawer-in { from { transform: translateX(-100%); } }
-@media (prefers-reduced-motion: reduce) { .sheet.drawer { animation: none; } }
+/* шторка виїжджає знизу й від'їжджає вниз, тло темнішає й світлішає; меню — вбік */
+.backdrop { animation: fade-in .2s ease-out; }
+.sheet:not(.drawer) { animation: sheet-in .24s cubic-bezier(.2, .8, .2, 1); }
+.backdrop.closing { animation: fade-out .2s ease-in forwards; }
+.sheet.closing:not(.drawer) { animation: sheet-out .2s ease-in forwards; }
+.sheet.drawer.closing { animation: drawer-out .18s ease-in forwards; }
+.sheet.no-enter, .backdrop.no-enter { animation: none; }
+@keyframes sheet-in { from { transform: translateY(100%); } }
+@keyframes sheet-out { to { transform: translateY(100%); } }
+@keyframes drawer-out { to { transform: translateX(-100%); } }
+@keyframes fade-in { from { opacity: 0; } }
+@keyframes fade-out { to { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .sheet.drawer, .sheet, .backdrop { animation: none !important; } }
 .menu { display: flex; flex-direction: column; min-height: 100%; }
 .menu-head { display: flex; align-items: center; gap: 14px; padding: 22px 20px 18px; border-bottom: 1px solid var(--line); }
 .menu-logo { width: 44px; height: 44px; border-radius: 12px; flex: none; }

@@ -58,12 +58,33 @@ export function toast(text, action) {
   toastTimer = setTimeout(() => { box.hidden = true; }, action ? 5000 : 2500);
 }
 
+export const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
 // Шторка має запис в історії: системна «Назад» на Android закриває її, а не йде з екрана.
 let openSheet = null;
 
 window.addEventListener('popstate', () => {
   if (openSheet) openSheet.close(true);
 });
+
+// Скільки їде шторка вниз (як sheet-out у CSS); запас — коли animationend не прийде, бо вкладка у фоні
+const SHEET_OUT_MS = 200;
+
+/** Шторка й тло від'їжджають і зникають; закрита вона вже одразу — лише вузли ще мить на екрані, без дотиків. */
+function leave(backdrop, panel, instant) {
+  if (instant || reduceMotion()) { backdrop.remove(); panel.remove(); return; }
+  for (const n of [backdrop, panel]) { n.classList.add('closing'); n.inert = true; }
+  let done = false;
+  const drop = () => {
+    if (done) return;
+    done = true;
+    backdrop.remove();
+    panel.remove();
+  };
+  // animationend спливає й від дітей (монета «ловить», смужка тегів) — чекаємо саму шторку
+  panel.addEventListener('animationend', (e) => { if (e.target === panel) drop(); });
+  setTimeout(drop, SHEET_OUT_MS + 100);
+}
 
 /**
  * Шторка поверх екрана. bare — без смужки й заголовка (екран суми, меню); cls — вигляд: 'screen' на весь екран,
@@ -72,23 +93,24 @@ window.addEventListener('popstate', () => {
 export function sheet(title, content, { onClose, cls = '', bare = false } = {}) {
   // Шторка міняє шторку (тип монети «Витрата» → «Ціль»): запис в історії той самий. Інакше history.back
   // від старої прийшов би вже після відкриття нової й закрив би її — форма зникала без сліду
+  // Нова одразу на місці старої, без виїзду знизу — інакше форма їздила б при кожній зміні типу
   const replacing = Boolean(openSheet);
-  openSheet?.close(true);
+  openSheet?.close(true, true);
   const layer = $('layer');
-  const close = (fromHistory = false) => {
+  const close = (fromHistory = false, instant = false) => {
     if (openSheet !== api) return;
     openSheet = null;
-    layer.replaceChildren();
+    leave(backdrop, panel, instant);
     document.body.classList.remove('layer-open');
     if (!fromHistory && history.state?.sheet) history.back();
     onClose?.();
   };
   const api = { close };
-  const panel = h('div', { class: `sheet ${cls}`.trim(), role: 'dialog', 'aria-modal': 'true', 'aria-label': title, tabindex: '-1' },
+  const panel = h('div', { class: `sheet ${cls}${replacing ? ' no-enter' : ''}`.trim(), role: 'dialog', 'aria-modal': 'true', 'aria-label': title, tabindex: '-1' },
     bare ? null : h('div', { class: 'sheet-grip', 'aria-hidden': 'true' }),
     bare ? null : h('h2', { class: 'sheet-title' }, title),
     content);
-  const backdrop = h('div', { class: `backdrop ${cls ? `${cls}-backdrop` : ''}`.trim(), onClick: () => close() });
+  const backdrop = h('div', { class: `backdrop ${cls ? `${cls}-backdrop` : ''}${replacing ? ' no-enter' : ''}`.trim(), onClick: () => close() });
   panel.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
   layer.replaceChildren(backdrop, panel);
   document.body.classList.add('layer-open');

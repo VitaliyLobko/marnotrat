@@ -9,7 +9,7 @@ import { cursors, exchange } from './cloud.js';
 import { CHANGES, changesSince } from './changes.js';
 import * as Csv from './csv.js';
 import { initLock, lockOn, lockDelay, lockAvailable, enableLock, disableLock, setLockDelay, LOCK_DELAYS } from './lock.js';
-import { $, h, icon, hasIcon, toast, sheet, closeSheet, chips, swipeStep, vibrate } from './ui.js';
+import { $, h, icon, hasIcon, toast, sheet, closeSheet, chips, swipeStep, vibrate, reduceMotion } from './ui.js';
 
 const state = { coins: [], ops: [], meta: [] };
 let view = 'main';
@@ -774,9 +774,18 @@ const coinMoney = (v, cur) => M.money(v, cur, { sign: v < 0 ? '−' : '' });
 
 // Суми монет, показані востаннє: змінену після збереження «докручуємо» до нової
 const shownSums = new Map();
-const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+// Так само рівень бюджету в монеті й її стан: рівень доливається, перехід за бюджет — монета здригається
+const shownFill = new Map();
+const shownSt = new Map();
 
 function animateSums() {
+  const faces = document.querySelectorAll('.coin-face[data-fill]');
+  // Один примусовий перерахунок на всі монети: старий рівень має потрапити на екран, інакше переходу не буде
+  if (faces.length) void document.body.offsetHeight;
+  for (const el of faces) {
+    el.style.setProperty('--fill', el.dataset.fill);
+    delete el.dataset.fill;
+  }
   for (const el of document.querySelectorAll('.coin-sum[data-from]')) {
     const from = Number(el.dataset.from);
     const to = Number(el.dataset.to);
@@ -826,11 +835,18 @@ function coinEl(c, ym) {
     sum = monthSpent(c, ym);
     ({ st, fill } = coinBudget(c, sum, ym));
   }
-  const face = h('div', { class: 'coin-face', style: { '--fill': String(fill) } },
+  const prevFill = shownFill.get(c.id);
+  const prevSt = shownSt.get(c.id);
+  shownFill.set(c.id, fill);
+  shownSt.set(c.id, st);
+  const rise = prevFill !== undefined && prevFill !== fill && !reduceMotion();
+  const face = h('div', { class: 'coin-face', style: { '--fill': String(rise ? prevFill : fill) } },
     c.kind === 'expense' ? h('span', { class: 'coin-fill' }) : null,
     icon(hasIcon(c.icon) ? c.icon : 'coins', 'ico coin-ico'));
+  if (rise) face.dataset.fill = String(fill);
   const zero = Math.abs(sum) < 0.005 && c.kind !== 'debt' ? ' zero' : '';
-  const el = h('div', { class: `coin k-${c.kind}${st ? ` st-${st}` : ''}${zero}`, 'data-id': c.id, 'data-kind': c.kind },
+  const alarm = prevSt !== undefined && prevSt !== 'over' && st === 'over' ? ' alarm' : '';
+  const el = h('div', { class: `coin k-${c.kind}${st ? ` st-${st}` : ''}${zero}${alarm}`, 'data-id': c.id, 'data-kind': c.kind },
     h('div', { class: 'coin-name' }, c.name),
     face,
     sumEl(c, sum),
@@ -1264,7 +1280,7 @@ function bindCoin(el, face, c) {
       if (hit) openAmount({ from: c.id, to: target.dataset.id });
       else if (tap) {
         if (editing()) editCoin(c);
-        else openFeed(c.id);
+        else openFeed(c.id, face);
       }
     };
     function cleanup(landed = null) {
@@ -1288,7 +1304,7 @@ function bindCoin(el, face, c) {
   });
   // З клавіатури: Enter — історія монети
   face.tabIndex = 0;
-  face.addEventListener('keydown', (e) => { if (e.key === 'Enter') openFeed(c.id); });
+  face.addEventListener('keydown', (e) => { if (e.key === 'Enter') openFeed(c.id, face); });
 }
 
 // ---------- екран суми ----------
@@ -1540,7 +1556,7 @@ function openAmount({ from, to, op = null, preset = null, copy = null }) {
     const accBefore = src.kind === 'account' ? balance(src) : 0;
     const goalBefore = dst.kind === 'goal' ? balance(dst) : 0;
     closeSheet();
-    await save({ ops: { put: [rec] } });
+    await saveFlash({ ops: { put: [rec] } }, rec.id);
     const t = opType(rec);
     const sign = t === 'expense' ? '−' : t === 'income' ? '+' : '';
     // Поповнення, яке дотягнуло ціль до суми, — святкуємо
@@ -1832,18 +1848,37 @@ function opRow(op) {
     h('span', { class: 'op-right' },
       h('span', { class: `op-sum ${t}` }, M.money(v, cur, { sign }) + second),
       note.map((x) => h('span', { class: 'op-note' }, x))));
-  return swipeRow(row, { onLeft: () => deleteOp(op), onRight: () => openAmount({ from: op.from, to: op.to, op }) });
+  if (op.id === flashId) row.classList.add('flash');
+  return swipeRow(row, { onLeft: (wrap) => deleteOp(op, wrap), onRight: () => openAmount({ from: op.from, to: op.to, op }), away: true });
 }
 
-async function deleteOp(op) {
-  if (refuse([], [op.id])) return;
-  await save({ ops: { del: [op.id] } });
+// Операція, яку щойно записали чи повернули «Скасувати», — її рядок у стрічці на мить підсвічений
+let flashId = null;
+
+/** Зберегти операції й підсвітити їхній рядок, якщо стрічка відкрита. */
+async function saveFlash(changes, id) {
+  flashId = id;
+  try { await save(changes); } finally { flashId = null; }
+}
+
+/** Рядок, змахнутий для видалення, з'їжджає по висоті — сусіди підтягуються плавно, а не стрибком. */
+function collapseRow(wrap) {
+  if (reduceMotion() || !wrap.isConnected) return Promise.resolve();
+  return wrap.animate([{ height: `${wrap.offsetHeight}px` }, { height: '0px' }], { duration: 200, delay: 100, easing: 'ease-in' })
+    .finished.catch(() => {});
+}
+
+async function deleteOp(op, wrap = null) {
+  if (refuse([], [op.id])) { wrap?.restore(); return; }
+  // Дані — одразу; стрічку перемальовуємо, коли рядок уже з'їхав
+  await save({ ops: { del: [op.id] } }, { redraw: !wrap });
+  if (wrap) { await collapseRow(wrap); render(); }
   // Що операція записала в Стрілецький журнал (патрони, тюнінг, екіпірування) — теж прибрати
   const relink = await unlinkJournal(op.sl).catch(() => null);
   toast(relink ? `Операцію видалено — і з журналу (${op.sl.text})` : 'Операцію видалено', {
     label: 'Скасувати',
     run: async () => {
-      await save({ ops: { put: [{ ...op }] } });
+      await saveFlash({ ops: { put: [{ ...op }] } }, op.id);
       if (relink) await relink().catch(() => toast('У журнал не повернулось — додай там вручну'));
     },
   });
@@ -1852,8 +1887,9 @@ async function deleteOp(op) {
 /**
  * Свайп рядка: вліво — onLeft (видалити), вправо — onRight (змінити). Спрацьовує далі третини ширини:
  * короткий рух — це ще прокрутка. Після свайпу клік, що приходить слідом, не відкриває операцію.
+ * away — рядок, змахнутий вліво, не вертається, а їде за край; onLeft отримує обгортку, wrap.restore() — повернути.
  */
-function swipeRow(row, { onLeft, onRight, labels = null }) {
+function swipeRow(row, { onLeft, onRight, labels = null, away = false }) {
   const wrap = h('div', { class: 'swipe-row' },
     h('div', { class: 'swipe-bg edit', 'aria-hidden': 'true' }, icon(labels ? 'check' : 'pen'), labels?.[0] ?? 'Змінити'),
     h('div', { class: 'swipe-bg del', 'aria-hidden': 'true' }, labels?.[1] ?? 'Видалити', icon(labels ? 'skip' : 'trash')),
@@ -1895,9 +1931,14 @@ function swipeRow(row, { onLeft, onRight, labels = null }) {
     if (!start || e.pointerId !== start.id) return;
     const act = armed && e.type === 'pointerup' ? (dx < 0 ? onLeft : onRight) : null;
     swallow = axis === 'x';
-    reset();
-    if (act) { vibrate(40); act(); }
+    if (away && act === onLeft) {
+      row.style.transition = 'transform .15s ease-in';
+      row.style.transform = 'translateX(-100%)';
+      start = null; axis = null; dx = 0; armed = false;
+    } else reset();
+    if (act) { vibrate(40); act(wrap); }
   };
+  wrap.restore = reset;
   row.addEventListener('pointerup', finish);
   row.addEventListener('pointercancel', finish);
   row.addEventListener('click', (e) => { if (swallow) { swallow = false; e.stopImmediatePropagation(); } }, true);
@@ -1948,7 +1989,7 @@ async function confirmPlan(p) {
   };
   if (p.amountTo != null) rec.amountTo = p.amountTo;
   if (refuse([rec])) return;
-  await save({ ops: { put: [rec] } });
+  await saveFlash({ ops: { put: [rec] } }, rec.id);
   toast(`Проведено: ${coinOr(p.to).name}`, { label: 'Скасувати', run: () => save({ ops: { del: [rec.id] } }) });
 }
 
@@ -2457,9 +2498,21 @@ function iconPicker(d) {
   });
   paint();
   // Увесь вибір — одним рядком, що розгортається: інакше до «Зберегти» довго гортати
-  return h('details', { class: 'icon-pick-all' },
+  const el = h('details', { class: 'icon-pick-all' },
     h('summary', {}, current, h('span', {}, 'Іконка'), h('span', { class: 'muted small' }, 'змінити')),
     h('div', { class: 'icon-picker' }, search, h('div', { class: 'icon-groups' }, empty, groups)));
+  // d.icon змінили ззовні (валюта рахунку) — показати нову
+  el.repaint = paint;
+  return el;
+}
+
+// Рахунок у валюті отримує її знак, поки іконку не вибрали самі; з картки не міняємо — валютна картка теж картка
+const CURRENCY_ICON = { USD: 'dollar-sign', EUR: 'euro' };
+const AUTO_ICONS = new Set(['wallet', 'banknote', 'dollar-sign', 'euro']);
+
+function currencyIcon(kind, cur, now) {
+  if (kind !== 'account' || !AUTO_ICONS.has(now)) return now;
+  return CURRENCY_ICON[cur] ?? (now === 'dollar-sign' || now === 'euro' ? NEW_ICON.account : now);
 }
 
 function editCoin(orig, kind = orig?.kind) {
@@ -2520,7 +2573,7 @@ function editCoin(orig, kind = orig?.kind) {
     kind === 'goal' ? h('p', { class: 'muted small' }, 'Відкладене: гроші з рахунку переносиш сюди перетягуванням. У «Баланс» і у витрати не входять.') : null,
     debt ? h('p', { class: 'muted small' }, 'Дав у борг — тягни рахунок на цю монету; позичив чи тобі повертають — тягни її на рахунок. Ні витратою, ні доходом це не рахується.') : null,
     h('label', { class: 'flabel' }, debt ? 'Хто' : 'Назва'), name,
-    !used ? [h('p', { class: 'flabel' }, 'Валюта'), chips(M.CURRENCIES, d.currency, (v) => { d.currency = v; })]
+    !used ? [h('p', { class: 'flabel' }, 'Валюта'), chips(M.CURRENCIES, d.currency, (v) => { d.currency = v; d.icon = currencyIcon(kind, v, d.icon); grid.repaint(); })]
       : kind !== 'expense' ? h('p', { class: 'muted small' }, `Валюта: ${d.currency} — змінити не можна, бо вже є операції`) : null,
     debt ? [
       h('p', { class: 'flabel' }, 'Зараз'), chips([['owed', 'Мені винні'], ['owe', 'Я винен']], dir.v, (v) => { dir.v = v; }),
@@ -3084,7 +3137,7 @@ function planCsv(rows, at) {
       const c = found.get(`${k}|${lowName(name)}`);
       if (c) return c;
     }
-    const c = { id: uid(), kind: kinds[0], name: name.slice(0, 30), icon: NEW_ICON[kinds[0]], currency: cur || 'UAH', budget: 0, start: 0, order: order++, archived: false };
+    const c = { id: uid(), kind: kinds[0], name: name.slice(0, 30), icon: currencyIcon(kinds[0], cur, NEW_ICON[kinds[0]]), currency: cur || 'UAH', budget: 0, start: 0, order: order++, archived: false };
     found.set(`${c.kind}|${lowName(name)}`, c);
     fresh.push(c);
     return c;
@@ -3696,10 +3749,10 @@ function viewReconcile() {
 function openMenu() {
   // Пункт меню займає запис шторки в історії: «Назад» з екрана веде на головну, а не в закрите меню.
   // Звичайне закриття (history.back) скасувало б перехід, що йде слідом
+  // Меню зникає вже всередині переходу: на старому знімку воно їде геть разом з екраном, на новому його нема
   const pick = (key) => {
-    close(true);
     history.replaceState(null, '', `#${key}`);
-    route();
+    route(() => close(true, true));
   };
   const here = location.hash.slice(1).split('/')[0];
   // Лічильник біля пункту: що чекає уваги (помаранчевий) чи просто скільки є
@@ -3730,7 +3783,14 @@ function openMenu() {
   { cls: 'drawer', bare: true });
 }
 
-function openFeed(id) {
+// Монета, з якої відкрили її стрічку: на переході вона розростається й тане
+let heroFace = null;
+
+function openFeed(id, face = null) {
+  if (face && onMain()) {
+    heroFace = face;
+    face.style.viewTransitionName = 'coin-hero';
+  }
   go(`feed/${id}`);
 }
 
@@ -3822,7 +3882,14 @@ function render() {
   if (onMain()) { fitNames(); animateSums(); }
 }
 
-function route() {
+// Перший показ — без переходу: їхати нема звідки
+let routed = false;
+
+/**
+ * Показати екран з адреси. Зміна екрана — з переходом (View Transitions): вглиб — справа, на головну — назад,
+ * з монети — монета розростається. before — що прибрати вже на новому кадрі (меню).
+ */
+function route(before = null) {
   let [key, arg] = location.hash.slice(1).split('/');
   // Кнопки віджета Android: #add/expense, #add/income — екран суми зі звичними монетами поверх головної
   if (key === 'add') {
@@ -3833,14 +3900,34 @@ function route() {
   }
   const next = VIEWS[key] ? key : 'main';
   const changed = next !== view || (next === 'feed' && (arg ?? null) !== feedCoin);
-  view = next;
-  feedLazy = changed;
-  if (view === 'feed') {
-    feedCoin = arg ?? null;
-    if (changed) { feedDays = 60; feedQuery = ''; feedType = 'all'; }
+  // Головна й «Редагування» — той самий екран, лише режим
+  const slide = changed && routed && !(onMain() && (next === 'main' || next === 'edit'));
+  const hero = heroFace && next === 'feed' ? heroFace : null;
+  heroFace = null;
+  routed = true;
+  const apply = () => {
+    before?.();
+    view = next;
+    feedLazy = changed;
+    if (view === 'feed') {
+      feedCoin = arg ?? null;
+      if (changed) { feedDays = 60; feedQuery = ''; feedType = 'all'; }
+    }
+    render();
+    if (changed) scrollTo(0, 0);
+  };
+  if (!slide || !document.startViewTransition || reduceMotion()) {
+    if (hero) hero.style.viewTransitionName = '';
+    apply();
+    return;
   }
-  render();
-  if (changed) scrollTo(0, 0);
+  const root = document.documentElement;
+  const mode = hero ? 'vt-coin' : next === 'main' || next === 'edit' ? 'vt-back' : '';
+  if (mode) root.classList.add(mode);
+  const vt = document.startViewTransition(apply);
+  // Новий перехід, поки не скінчився попередній (подвійний тап), — старий пропущено, це не помилка
+  vt.ready.catch(() => {});
+  vt.finished.finally(() => { if (mode) root.classList.remove(mode); }).catch(() => {});
 }
 
 // ---------- оновлення застосунку ----------
@@ -3900,7 +3987,7 @@ async function init() {
     $('view').replaceChildren(h('p', { class: 'error' }, `Не вдалося відкрити сховище браузера: ${err.message}`));
     return;
   }
-  window.addEventListener('hashchange', route);
+  window.addEventListener('hashchange', () => route());
   // Синхронізація: при відкритті й поверненні в застосунок; ключ Google оновлюємо з першого натискання
   if (Sync.syncOn()) { Sync.preload(); runSync(); }
   runCloud();
