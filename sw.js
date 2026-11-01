@@ -7,6 +7,12 @@ const ASSETS = [
   './version.js',
   './manifest.webmanifest',
   './css/app.css',
+  './css/topo.svg',
+  './css/topo-light.svg',
+  './css/lines.webp',
+  './css/lines-acc.webp',
+  './css/lines-sand.webp',
+  './css/lines-khaki.webp',
   './js/boot.js',
   './js/app.js',
   './js/db.js',
@@ -60,7 +66,13 @@ self.addEventListener('fetch', (event) => {
     const cached = await caches.match(request, { ignoreSearch: true });
     if (cached) return cached;
     try {
-      return await fetch(request);
+      const res = await fetch(request);
+      // Широкі фони для комп'ютера не в ASSETS (телефону не потрібні) — кладемо в кеш при першому показі, щоб були й офлайн
+      if (res.ok && /-wide\.webp$/.test(new URL(request.url).pathname)) {
+        const copy = res.clone();
+        caches.open(CACHE).then((c) => c.put(request, copy));
+      }
+      return res;
     } catch (err) {
       if (request.mode === 'navigate') return caches.match('./index.html');
       throw err;

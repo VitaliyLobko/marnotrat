@@ -9,7 +9,7 @@ import { cursors, exchange } from './cloud.js';
 import { CHANGES, changesSince } from './changes.js';
 import * as Csv from './csv.js';
 import { initLock, lockOn, lockDelay, lockAvailable, enableLock, disableLock, setLockDelay, LOCK_DELAYS } from './lock.js';
-import { $, h, icon, hasIcon, toast, sheet, closeSheet, chips, swipeStep, vibrate, reduceMotion } from './ui.js';
+import { $, h, icon, hasIcon, toast, sheet, closeSheet, chips, swipeStep, vibrate, reduceMotion, wheelStrip } from './ui.js';
 
 const state = { coins: [], ops: [], meta: [] };
 let view = 'main';
@@ -2590,7 +2590,25 @@ function editCoin(orig, kind = orig?.kind) {
 
 // ---------- налаштування ----------
 
-const THEMES = [['auto', 'Як у системі'], ['light', 'Світла'], ['dark', 'Темна']];
+// Спецрежими — як у Shooter's Log: Нічна (усе червоним) і монітори-кінескопи, усі поверх темної
+const THEMES = [['auto', 'Як у системі'], ['light', 'Світла'], ['dark', 'Темна'], ['night', 'Нічна'], ['phosphor', 'Фосфор'], ['amber', 'Бурштин'], ['white', 'Білий фосфор']];
+const SPECIAL_THEMES = ['night', 'phosphor', 'amber', 'white'];
+
+// Фон під картками — як у Shooter's Log, без камуфляжів; свій набір для темної й світлої, перший — за замовчуванням.
+// Ті самі ключі — у js/boot.js
+const BACKDROPS = {
+  dark: [['plain', 'Без малюнка'], ['map', 'Карта'], ['olive', 'Олива'], ['carbon', 'Карбон'], ['coyote', 'Койот'], ['lines', 'Лінії'], ['lines-acc', 'Лінії з акцентом']],
+  light: [['l-plain', 'Без малюнка'], ['l-map', 'Карта'], ['l-mm', 'Міліметрівка'], ['l-sand', 'Пісок'], ['l-sand-acc', 'Пісок з акцентом'], ['l-khaki', 'Хакі'], ['l-khaki-acc', 'Хакі з акцентом']],
+};
+const BG_KEY = { dark: 'bg', light: 'bg-light' };
+
+/** Вибраний фон для теми; у спецрежимах фону немає — null. */
+function backdropPref(theme) {
+  const list = BACKDROPS[theme];
+  if (!list) return null;
+  const v = recall(BG_KEY[theme]);
+  return list.some(([k]) => k === v) ? v : list[0][0];
+}
 
 /** «Вхід за відбитком»: увімкнути, через скільки блокувати у фоні, вимкнути. */
 function lockRow() {
@@ -2624,8 +2642,23 @@ function lockRow() {
 function applyTheme() {
   const pref = recall('theme') || 'auto';
   const light = pref === 'light' || (pref === 'auto' && matchMedia('(prefers-color-scheme: light)').matches);
-  document.documentElement.dataset.theme = light ? 'light' : 'dark';
-  document.querySelector('meta[name=theme-color]')?.setAttribute('content', light ? '#ffffff' : '#1b1e22');
+  const theme = SPECIAL_THEMES.includes(pref) ? pref : light ? 'light' : 'dark';
+  document.documentElement.dataset.theme = theme;
+  const bg = backdropPref(theme);
+  if (bg) document.documentElement.dataset.bg = bg; else delete document.documentElement.dataset.bg;
+  const k = nightLevel() / 100;
+  document.querySelector('#night-red feColorMatrix')?.setAttribute('values',
+    `${(0.5 * k).toFixed(3)} ${(0.6 * k).toFixed(3)} ${(0.1 * k).toFixed(3)} 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0`);
+  // Смуга браузера — у тон шапки: у світлій і темній це --surface вибраного фону
+  const bar = theme === 'night' ? '#000000' : SPECIAL_THEMES.includes(theme) ? '#0b0d0b'
+    : getComputedStyle(document.documentElement).getPropertyValue('--surface').trim();
+  document.querySelector('meta[name=theme-color]')?.setAttribute('content', bar);
+}
+
+/** Яскравість червоного в нічній темі, 20–100 %. */
+function nightLevel() {
+  const v = Number(recall('night-level'));
+  return v >= 20 && v <= 100 ? v : 80;
 }
 
 /** Курс НБУ на сьогодні; власний курс (manual) не перезаписуємо. */
@@ -2688,8 +2721,58 @@ function ratesRow() {
 
 function themeRow() {
   const cur = recall('theme') || 'auto';
-  return setRow('theme', 'palette', 'Тема', THEMES.find(([v]) => v === cur)?.[1] ?? '',
-    [chips(THEMES, cur, (v) => { remember('theme', v); applyTheme(); render(); })]);
+  // Дві групи: щоденні теми й «Спецрежими»; вибрана підсвічується у своїй групі
+  const pick = (special) => chips(THEMES.filter(([k]) => SPECIAL_THEMES.includes(k) === special), cur,
+    (v) => { remember('theme', v); applyTheme(); render(); });
+  return setRow('theme', 'palette', 'Тема', THEMES.find(([v]) => v === cur)?.[1] ?? '', [
+    pick(false),
+    h('p', { class: 'theme-group' }, 'Спецрежими'),
+    pick(true),
+    // Ніч буває різна: тягнеш — сторінка одразу темнішає чи світлішає
+    cur === 'night' ? h('label', { class: 'night-level' }, h('span', {}, 'Яскравість червоного'),
+      h('input', { type: 'range', min: '20', max: '100', step: '5', value: String(nightLevel()),
+        onInput: (e) => { remember('night-level', e.target.value); applyTheme(); } })) : null,
+    h('p', { class: 'muted small' }, 'Нічна — усе червоним, щоб не збивати нічний зір. Фосфор, Бурштин і Білий фосфор — як старі монітори-кінескопи.')]);
+}
+
+/** Фон під картками — плитки з самим фоном, щоб видно було до вибору; набір — для поточної теми, у спецрежимах рядка немає. */
+function backdropRow() {
+  const theme = document.documentElement.dataset.theme;
+  const list = BACKDROPS[theme];
+  if (!list) return null;
+  let now = backdropPref(theme);
+  const label = (k) => list.find(([x]) => x === k)[1];
+  const strip = h('div', { class: 'bg-picks', role: 'radiogroup', 'aria-label': 'Фон' }, list.map(([k, name]) => h('button', {
+    type: 'button', class: 'bg-pick', role: 'radio', 'aria-checked': String(k === now), 'data-bg': k,
+    onClick: (e) => wheel.centerOn(e.currentTarget),
+  }, h('span', { class: 'bg-sw', 'data-bg': k }), h('span', {}, name))));
+  // Фон посередині — вибраний і одразу під картками: гортаєш — бачиш наживо
+  const wheel = wheelStrip(strip, (b) => {
+    if (b.dataset.bg === now) return;
+    now = b.dataset.bg;
+    remember(BG_KEY[theme], now);
+    strip.querySelectorAll('.bg-pick').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
+    applyTheme();
+    // Без перемальовування — інакше стрічка злетіла б посеред гортання; назву в рядку міняємо на місці
+    row.querySelector('.set-val').textContent = label(now);
+  }, '.bg-pick');
+  // «‹ ›» по краях — видно, що стрічку гортають
+  const step = (dir) => {
+    const on = strip.querySelector('[aria-checked="true"]');
+    const to = dir < 0 ? on?.previousElementSibling : on?.nextElementSibling;
+    if (to) wheel.centerOn(to);
+  };
+  const nav = (dir, text, name) => h('button', { type: 'button', class: 'bg-nav', 'aria-label': text, onClick: () => step(dir) }, name);
+  // Поля й вибраний посередині рахуються від ширини стрічки: поки її не видно, досчитуємо, щойно з'явиться
+  let width = 0;
+  new ResizeObserver(() => {
+    if (!strip.clientWidth || strip.clientWidth === width) return;
+    width = strip.clientWidth;
+    wheel.settle(strip.querySelector('[aria-checked="true"]'));
+  }).observe(strip);
+  const row = setRow('backdrop', 'mountain', 'Фон', label(now),
+    h('div', { class: 'bg-wheel' }, nav(-1, 'Попередній', '‹'), strip, nav(1, 'Наступний', '›')));
+  return row;
 }
 
 function backupRow() {
@@ -2725,7 +2808,7 @@ function viewSettings() {
   // Від того, що чіпають найчастіше, до разового; «Про застосунок» — карткою внизу
   return h('div', { class: 'page settings' },
     setList('Облік', [periodRow(), ratesRow(), tagsRow(), hiddenRow()]),
-    setList('Вигляд і вхід', [themeRow(), lockRow()]),
+    setList('Вигляд і вхід', [themeRow(), backdropRow(), lockRow()]),
     setList('Синхронізація', [serverRow(), driveRow()]),
     setList('На телефоні', [widgetRow(), telegramRow()]),
     setList('Дані', [backupRow(), csvRow(), wipeRow()]),
