@@ -170,7 +170,7 @@ function keyNote() {
   return h('div', { class: 'key-note', role: 'alert' },
     h('b', {}, 'Ключ доступу не підходить'),
     h('span', {}, ' — операції не йдуть на інші телефони. Візьми новий ключ командою /key у Telegram-боті й встав у будь-якому застосунку: Хобі-план, Вага чи тут. '),
-    h('button', { type: 'button', class: 'btn primary', onClick: () => { remember('fold-sync', 'open'); go('settings'); } }, 'Вставити ключ'));
+    h('button', { type: 'button', class: 'btn primary', onClick: () => { remember('set-open', 'server'); go('settings'); } }, 'Вставити ключ'));
 }
 
 /** Адреса сервера й ключ доступу: вставлені тут, у Хобі-плані чи Вазі на цьому телефоні — одні на всіх. */
@@ -204,36 +204,36 @@ const moreText = (...lines) => h('details', { class: 'about-more set-more' }, h(
   h('div', { class: 'muted small' }, lines.map((t) => h('p', {}, t))));
 
 /**
- * «Синхронізація»: стан обміну й «Обмінятися». Працює — адреса й ключ сховані під «Адреса й ключ»;
+ * «База на сервері»: стан обміну й «Обмінятися». Працює — адреса й ключ сховані під «Адреса й ключ»;
  * не ввімкнено чи ключ не підходить — форма одразу відкрита.
  */
-function botCard() {
+function serverRow() {
   const cfg = Bot.botConfig();
   const synced = cloudCur.last();
   const bad = Bot.keyProblem() || Boolean(cloud.error);
   const state = Bot.keyProblem() ? 'Ключ доступу не підходить — візьми новий командою /key у Telegram-боті й встав нижче.'
     : !cfg ? 'Не ввімкнено — монети й операції лише на цьому телефоні.'
       : cloud.error ? `Помилка: ${cloud.error}.` : synced ? `Обмін: ${fmtWhen(synced)}` : 'Обміну ще не було.';
+  const value = Bot.keyProblem() ? 'Ключ не підходить' : !cfg ? 'Вимкнено' : cloud.error ? 'Помилка' : synced ? shortWhen(synced) : 'Ще не було';
   const form = botKeyForm(cfg);
   const open = !cfg || Bot.keyProblem();
-  return h('section', { class: 'card set-card' },
-    h('h2', {}, 'База на сервері'),
+  return setRow('server', 'server', 'База на сервері', value, [
     h('p', { class: bad ? 'small error-text' : 'muted small' }, state),
     cfg ? h('div', { class: 'btn-grid' },
       h('button', { type: 'button', class: 'btn', onClick: () => runCloud({ loud: true }) }, icon('refresh'), 'Обмінятися')) : null,
     open ? form : h('details', { class: 'about-more set-more' }, h('summary', {}, 'Адреса й ключ'), form),
     moreText(
       'Монети й операції лежать у спільній базі на сервері — однакові на всіх телефонах; без інтернету все піде пізніше.',
-      'Ключ доступу дає команда /key у Telegram-боті; досить вставити в одному застосунку — Хобі-план, Вага чи тут.'));
+      'Ключ доступу дає команда /key у Telegram-боті; досить вставити в одному застосунку — Хобі-план, Вага чи тут.')],
+  { tone: bad ? 'bad' : cfg ? 'ok' : '' });
 }
 
-/** «Telegram-бот · підсумки»: гроші у вечірньому підсумку бота Хобі-плану. Без синхронізації — картки нема. */
-function telegramCard() {
+/** «Підсумки в Telegram»: гроші у вечірньому підсумку бота Хобі-плану. Без бази на сервері — рядка нема. */
+function telegramRow() {
   if (!Bot.botConfig()) return null;
   const on = Bot.botOn();
   const last = Bot.lastSent();
-  return h('section', { class: 'card set-card' },
-    h('h2', {}, 'Підсумки в Telegram'),
+  return setRow('telegram', 'comment', 'Підсумки в Telegram', on ? 'Увімкнено' : 'Вимкнено', [
     chips([['on', 'Увімкнено'], ['off', 'Вимкнено']], on ? 'on' : 'off', (v) => {
       Bot.setBotOn(v === 'on');
       if (v === 'on') Bot.scheduleBot(botPayload, 0);
@@ -244,7 +244,7 @@ function telegramCard() {
       : 'Гроші у вечірній підсумок бота не потраплять.'),
     on ? moreText(
       'Суми йдуть самі після кожної зміни, а гроші приходять у вечірньому підсумку бота. Час підсумку — у Хобі-плані.',
-      'Боту йдуть лише суми за дні й категорії та бюджет місяця — без операцій і коментарів.') : null);
+      'Боту йдуть лише суми за дні й категорії та бюджет місяця — без операцій і коментарів.') : null]);
 }
 
 // ---------- синхронізація з Google Диском ----------
@@ -429,7 +429,7 @@ function syncChip() {
   const s = chipState();
   if (!s) return null;
   const onClick = () => {
-    if (s.st === 'key') { remember('fold-sync', 'open'); go('settings'); return; }
+    if (s.st === 'key') { remember('set-open', 'server'); go('settings'); return; }
     if (s.st === 'offline') { toast(s.title); return; }
     if (Bot.botConfig()) runCloud({ loud: true }); else runSync({ loud: true });
   };
@@ -483,19 +483,18 @@ function usualPair(type) {
 }
 
 /** «Віджет на головний екран»: є застосунок — передати адресу й ключ, немає — Chrome качає APK. */
-function widgetCard() {
+function widgetRow() {
   const link = Widget.setupLink();
-  return h('section', { class: 'card set-card' },
-    h('h2', {}, 'Віджет на головний екран'),
+  return setRow('widget', 'smartphone', 'Віджет на екран', link ? '' : 'Потрібна база', [
     h('p', { class: 'muted small' }, link
-      ? 'На день, сьогодні, баланс і тиждень — на головному екрані Android.'
-      : 'Віджет бере цифри з бази на сервері — спершу ввімкни синхронізацію.'),
+      ? 'Баланс, скільки можна на день, сьогоднішні витрати й тиждень — на головному екрані Android.'
+      : 'Віджет бере цифри з бази на сервері — спершу ввімкни «База на сервері».'),
     link ? h('div', { class: 'btn-grid' },
       h('a', { class: 'btn primary', href: link }, icon('smartphone'), 'Встановити'),
       h('a', { class: 'btn', href: Widget.APK_URL }, icon('archive'), 'APK файлом')) : null,
     link ? moreText(
       'Перший тап завантажить застосунок віджета — дозволь Chrome встановлення. Другий — підключить його до сервера й запропонує додати віджет 4×1 чи 4×2.',
-      'Цифри оновлюються раз на 15 хвилин і кнопкою ⟳; Марнотрат надсилає їх після кожного запису.') : null);
+      'Цифри рахує сервер; віджет оновлює їх раз на 15 хвилин, після розблокування екрана й тапом по нижньому рядку.') : null]);
 }
 
 // ---------- підрахунки ----------
@@ -2593,9 +2592,9 @@ function editCoin(orig, kind = orig?.kind) {
 
 const THEMES = [['auto', 'Як у системі'], ['light', 'Світла'], ['dark', 'Темна']];
 
-/** «Вхід за відбитком»: увімкнути, через скільки блокувати у фоні, вимкнути з підтвердженням. */
-function lockCard() {
-  const body = h('div', {});
+/** «Вхід за відбитком»: увімкнути, через скільки блокувати у фоні, вимкнути. */
+function lockRow() {
+  const body = h('div', { class: 'set-sub' });
   const act = (fn, done) => async () => {
     try {
       await fn();
@@ -2608,17 +2607,18 @@ function lockCard() {
   if (lockOn()) {
     body.append(
       h('p', { class: 'muted small' }, 'Блокувати після згортання:'),
-      chips(LOCK_DELAYS.map((m) => [String(m), m ? `${m} хв` : 'Одразу']), String(lockDelay()), (v) => setLockDelay(Number(v))),
+      chips(LOCK_DELAYS.map((m) => [String(m), m ? `${m} хв` : 'Одразу']), String(lockDelay()), (v) => { setLockDelay(Number(v)); render(); }),
       h('div', { class: 'btn-grid' }, h('button', { type: 'button', class: 'btn', onClick: act(disableLock, 'Вхід за відбитком вимкнено') }, 'Вимкнути')));
   } else {
     lockAvailable().then((ok) => body.append(ok
       ? h('div', { class: 'btn-grid' }, h('button', { type: 'button', class: 'btn primary', onClick: act(enableLock, 'Вхід за відбитком увімкнено') }, 'Увімкнути'))
       : h('p', { class: 'muted small' }, 'На цьому пристрої немає відбитка, обличчя чи PIN-коду, які браузер може перевірити.')));
   }
-  return h('section', { class: 'card set-card' }, h('h2', {}, 'Вхід за відбитком'),
+  const value = !lockOn() ? 'Вимкнено' : lockDelay() ? `Через ${lockDelay()} хв` : 'Одразу';
+  return setRow('lock', 'shield-check', 'Вхід за відбитком', value, [
     h('p', { class: 'muted small' }, 'Відбиток, обличчя чи PIN-код телефона — лише на цьому пристрої.'),
     body,
-    moreText('Це захист від чужих очей: дані на телефоні не шифруються.'));
+    moreText('Це захист від чужих очей: дані на телефоні не шифруються.')]);
 }
 
 function applyTheme() {
@@ -2642,7 +2642,7 @@ async function fetchRates(force = false) {
   return true;
 }
 
-function periodCard() {
+function periodRow() {
   const day = startDay();
   const select = h('select', {
     class: 'field', 'aria-label': 'День початку місяця',
@@ -2653,14 +2653,14 @@ function periodCard() {
       toast(Number(e.target.value) === 1 ? 'Місяць — календарний' : `Місяць обліку — з ${e.target.value}-го`);
     },
   }, Array.from({ length: 28 }, (_, i) => h('option', { value: String(i + 1), selected: i + 1 === day }, i === 0 ? '1 — календарний місяць' : `${i + 1}-го числа`)));
-  return h('section', { class: 'card set-card' },
-    h('h2', {}, 'Початок місяця'),
+  return setRow('period', 'calendar', 'Початок місяця', day === 1 ? 'Календарний' : `З ${day}-го`, [
     h('p', { class: 'muted small' }, 'З якого дня рахувати бюджети й звіти — зручно з дня зарплати.'),
     select,
-    day === 1 ? null : h('p', { class: 'muted small' }, `Зараз: ${periodTitle(currentPeriod())}`));
+    day === 1 ? null : h('p', { class: 'muted small' }, `Зараз: ${periodTitle(currentPeriod())}`)]);
 }
 
-function viewSettings() {
+/** Курси до гривні: свої чи НБУ. Поле не перемальовує екран — інакше фокус злітав би на півдорозі до другого курсу. */
+function ratesRow() {
   const m = ratesMeta();
   const rateInput = (cc) => h('input', {
     type: 'number', inputmode: 'decimal', step: '0.0001', min: '0', value: String(m[cc] ?? ''), class: 'field', 'aria-label': `Курс ${cc}`,
@@ -2671,74 +2671,101 @@ function viewSettings() {
       toast(`Свій курс ${cc}: ${v}`);
     },
   });
-  const rateStatus = h('p', { class: 'muted small' }, m.manual ? 'Свій курс — НБУ не підтягується' : m.date ? `Курс НБУ на ${M.dateTitle(m.date)}` : 'Курс за замовчуванням — підтягну НБУ, щойно буде зв’язок');
+  const status = m.manual ? 'Свій курс — НБУ не підтягується' : m.date ? `Курс НБУ на ${M.dateTitle(m.date)}` : 'Курс за замовчуванням — підтягну НБУ, щойно буде зв’язок';
+  const short = (v) => (v > 0 ? Number(v).toFixed(2).replace('.', ',') : '—');
+  return setRow('rates', 'banknote', 'Курси до гривні', `$ ${short(m.USD)} · € ${short(m.EUR)}`, [
+    h('div', { class: 'rate-row' },
+      h('label', {}, h('b', {}, '$'), rateInput('USD')),
+      h('label', {}, h('b', {}, '€'), rateInput('EUR'))),
+    h('div', { class: 'row-between' },
+      h('p', { class: 'muted small' }, status),
+      h('button', {
+        type: 'button', class: 'btn', onClick: async () => {
+          try { await fetchRates(true); toast('Курс НБУ оновлено'); render(); } catch (err) { toast(err instanceof TypeError ? 'Немає зв’язку з НБУ' : err.message); }
+        },
+      }, icon('refresh'), 'НБУ'))]);
+}
+
+function themeRow() {
+  const cur = recall('theme') || 'auto';
+  return setRow('theme', 'palette', 'Тема', THEMES.find(([v]) => v === cur)?.[1] ?? '',
+    [chips(THEMES, cur, (v) => { remember('theme', v); applyTheme(); render(); })]);
+}
+
+function backupRow() {
   const file = h('input', { type: 'file', accept: 'application/json,.json', hidden: true, onChange: (e) => importBackup(e.target.files[0]) });
-  const csvFile = h('input', { type: 'file', accept: '.csv,text/csv,text/plain', hidden: true, onChange: (e) => { importCsv(e.target.files[0]); e.target.value = ''; } });
-  const theme = chips(THEMES, recall('theme') || 'auto', (v) => { remember('theme', v); applyTheme(); });
-  // Порядок — від того, що чіпають найчастіше, до разового: облік, вигляд, синхронізація, телефон, копії, про застосунок
-  return h('div', { class: 'page' },
-    settingsGroup('Облік', [periodCard(),
-      h('section', { class: 'card set-card' },
-        h('h2', {}, 'Курси до гривні'),
-        h('div', { class: 'rate-row' },
-          h('label', {}, h('b', {}, '$'), rateInput('USD')),
-          h('label', {}, h('b', {}, '€'), rateInput('EUR'))),
-        h('div', { class: 'row-between' },
-          rateStatus,
-          h('button', {
-            type: 'button', class: 'btn', onClick: async () => {
-              try { await fetchRates(true); toast('Курс НБУ оновлено'); render(); } catch (err) { toast(err instanceof TypeError ? 'Немає зв’язку з НБУ' : err.message); }
-            },
-          }, icon('refresh'), 'НБУ')))], { fold: 'account' }),
-    settingsGroup(`Теги · ${allTags().length}`, [tagsCard()], { fold: 'tags' }),
-    settingsGroup(`Сховані монети · ${state.coins.filter((c) => c.archived).length}`, [hiddenCard()], { fold: 'hidden' }),
-    settingsGroup('Вигляд і вхід', [h('section', { class: 'card set-card' }, h('h2', {}, 'Тема'), theme), lockCard()], { fold: 'look' }),
-    settingsGroup('Синхронізація', [botCard(), syncCard()], { fold: 'sync' }),
-    settingsGroup('На телефоні', [widgetCard(), telegramCard()], { fold: 'phone' }),
-    settingsGroup('Копії й імпорт', [
-      h('section', { class: 'card set-card' },
-        h('h2', {}, 'Копія у файл'),
-        h('p', { class: 'muted small' }, 'Файл JSON з усіма даними — щоб відновити тут чи на іншому телефоні.'),
-        h('div', { class: 'btn-grid' },
-          h('button', { type: 'button', class: 'btn', onClick: exportBackup }, icon('archive'), 'Зберегти'),
-          h('button', { type: 'button', class: 'btn', onClick: () => file.click() }, icon('undo'), 'Відновити')),
-        file),
-      h('section', { class: 'card set-card' },
-        h('h2', {}, 'Таблиця CSV'),
-        h('p', { class: 'muted small' }, 'Операції з таблиці; в таблицю стрічку зберігає кнопка вгорі стрічки.'),
-        h('div', { class: 'btn-grid' }, h('button', { type: 'button', class: 'btn', onClick: () => csvFile.click() }, icon('upload'), 'Імпорт з CSV')),
-        moreText('Колонки «Дата», «Звідки», «Куди», «Сума», за бажанням — «Тип», «Валюта», «Теги», «Коментар». Монети шукаю за назвою, яких нема — створю; те, що вже є, пропущу.'),
-        csvFile)], { fold: 'data' }),
-    settingsGroup('Про застосунок', [aboutCard(), aboutPanel()], { fold: 'about' }),
-    settingsGroup('Небезпечна зона', [h('section', { class: 'card set-card' },
-      h('h2', {}, 'Почати з чистого'),
-      h('p', { class: 'muted small' }, Sync.syncOn()
-        ? 'Стерти всі монети й операції — тут, на Google Диску й на інших твоїх телефонах. Лишаться стартові монети.'
-        : 'Стерти всі монети й операції на цьому телефоні. Лишаться стартові монети.'),
-      h('button', { type: 'button', class: 'btn danger', onClick: wipeAll }, icon('close'), 'Стерти всі дані'))], { danger: true }));
+  return setRow('backup', 'archive', 'Копія у файл', '', [
+    h('p', { class: 'muted small' }, 'Файл JSON з усіма даними — щоб відновити тут чи на іншому телефоні.'),
+    h('div', { class: 'btn-grid' },
+      h('button', { type: 'button', class: 'btn', onClick: exportBackup }, icon('archive'), 'Зберегти'),
+      h('button', { type: 'button', class: 'btn', onClick: () => file.click() }, icon('undo'), 'Відновити')),
+    file]);
 }
 
-/** Група налаштувань, як у Стрілецькому журналі: рамка з назвою на лінії, розділи всередині — через лінію. */
-/** fold — назва для пам'яті: група згорнута, доки її не розгорнули; порожня згорнута — не показується. */
-function settingsGroup(title, sections, { danger = false, fold = '' } = {}) {
-  const items = sections.filter(Boolean);
-  if (!fold) return h('fieldset', { class: `settings-group${danger ? ' danger' : ''}` }, h('legend', {}, title), items);
-  if (!items.length) return null;
-  const key = `fold-${fold}`;
-  const group = h('fieldset', { class: `settings-group${recall(key) === 'open' ? '' : ' closed'}` });
-  const toggle = h('button', {
-    type: 'button', class: 'group-toggle', 'aria-expanded': String(!group.classList.contains('closed')), onClick: () => {
-      const closed = group.classList.toggle('closed');
-      toggle.setAttribute('aria-expanded', String(!closed));
-      remember(key, closed ? '' : 'open');
+function csvRow() {
+  const file = h('input', { type: 'file', accept: '.csv,text/csv,text/plain', hidden: true, onChange: (e) => { importCsv(e.target.files[0]); e.target.value = ''; } });
+  return setRow('csv', 'file-text', 'Імпорт з CSV', '', [
+    h('p', { class: 'muted small' }, 'Операції з таблиці; в таблицю стрічку зберігає кнопка вгорі стрічки.'),
+    h('div', { class: 'btn-grid' }, h('button', { type: 'button', class: 'btn', onClick: () => file.click() }, icon('upload'), 'Вибрати файл')),
+    moreText('Колонки «Дата», «Звідки», «Куди», «Сума», за бажанням — «Тип», «Валюта», «Теги», «Коментар». Монети шукаю за назвою, яких нема — створю; те, що вже є, пропущу.'),
+    file]);
+}
+
+/** «Стерти всі дані» — останнім рядком групи «Дані» й згорнуте: небезпечна дія не має бути найпомітнішою на екрані. */
+function wipeRow() {
+  return setRow('wipe', 'trash-2', 'Стерти всі дані', '', [
+    h('p', { class: 'muted small' }, Sync.syncOn()
+      ? 'Усі монети й операції — тут, на Google Диску й на інших твоїх телефонах. Лишаться стартові монети.'
+      : 'Усі монети й операції на цьому телефоні. Лишаться стартові монети.'),
+    h('div', { class: 'btn-grid' }, h('button', { type: 'button', class: 'btn danger', onClick: wipeAll }, icon('close'), 'Стерти всі дані'))],
+  { danger: true });
+}
+
+function viewSettings() {
+  // Від того, що чіпають найчастіше, до разового; «Про застосунок» — карткою внизу
+  return h('div', { class: 'page settings' },
+    setList('Облік', [periodRow(), ratesRow(), tagsRow(), hiddenRow()]),
+    setList('Вигляд і вхід', [themeRow(), lockRow()]),
+    setList('Синхронізація', [serverRow(), driveRow()]),
+    setList('На телефоні', [widgetRow(), telegramRow()]),
+    setList('Дані', [backupRow(), csvRow(), wipeRow()]),
+    aboutSection());
+}
+
+/** Група налаштувань: підпис над карткою, всередині — рядки через лінію. Порожня — не показується. */
+function setList(title, rows) {
+  const items = rows.filter(Boolean);
+  return items.length ? h('section', { class: 'set-group' }, h('h2', { class: 'set-caption' }, title), h('div', { class: 'card set-list' }, items)) : null;
+}
+
+/**
+ * Рядок налаштувань: іконка, назва й поточне значення — видно, що де стоїть, нічого не відкриваючи.
+ * Тап розгортає керування під рядком; відкритий завжди один, і його пам'ятаємо між перемальовуваннями.
+ */
+function setRow(key, ico, title, value, body, { tone = '', danger = false } = {}) {
+  const open = recall('set-open') === key;
+  const row = h('div', { class: `set-row${open ? ' open' : ''}${danger ? ' danger' : ''}` });
+  const head = h('button', {
+    type: 'button', class: 'set-head', 'aria-expanded': String(open), onClick: () => {
+      const opening = !row.classList.contains('open');
+      for (const r of document.querySelectorAll('.set-row.open')) setOpen(r, false);
+      setOpen(row, opening);
+      remember('set-open', opening ? key : '');
     },
-  }, icon('chevron'), title);
-  group.append(h('legend', {}, toggle), ...items);
-  return group;
+  }, h('span', { class: 'set-ico' }, icon(ico)), h('span', { class: 'set-title' }, title),
+  value ? h('span', { class: `set-val${tone ? ` ${tone}` : ''}` }, value) : null, icon('chevron', 'ico set-chev'));
+  row.append(head, h('div', { class: 'set-body', inert: !open }, h('div', { class: 'set-inner' }, h('div', { class: 'set-card set-pane' }, body))));
+  return row;
 }
 
-/** Усі теги з кількістю операцій і пошуком; тап — перейменувати, злити з іншим чи прибрати. Нема тегів — картки нема. */
-function tagsCard() {
+function setOpen(row, open) {
+  row.classList.toggle('open', open);
+  row.querySelector('.set-head').setAttribute('aria-expanded', String(open));
+  row.querySelector('.set-body').inert = !open;
+}
+
+/** Усі теги з кількістю операцій і пошуком; тап — перейменувати, злити з іншим чи прибрати. Нема тегів — рядка нема. */
+function tagsRow() {
   const count = new Map();
   for (const op of state.ops) for (const t of op.tags ?? []) count.set(t, (count.get(t) ?? 0) + 1);
   if (!count.size) return null;
@@ -2753,9 +2780,9 @@ function tagsCard() {
   };
   find.addEventListener('input', draw);
   draw();
-  return h('section', { class: 'card set-card' },
+  return setRow('tags', 'tag', 'Теги', String(tags.length), [
     h('p', { class: 'muted small' }, 'Тап по тегу — перейменувати, злити з іншим чи прибрати з усіх операцій. Великі літери й зайві пробіли прибираю сам.'),
-    tags.length > 12 ? find : null, list);
+    tags.length > 12 ? find : null, list]);
 }
 
 /** Шторка одного тегу: нова назва (така, що вже є, — злиття) чи «Прибрати тег»; операції лишаються. */
@@ -2785,8 +2812,8 @@ function editTag(t, n) {
       ok)));
 }
 
-/** Сховані монети: повернути (сховав помилково) чи видалити разом з операціями. Нема схованих — картки нема. */
-function hiddenCard() {
+/** Сховані монети: повернути (сховав помилково) чи видалити разом з операціями. Нема схованих — рядка нема. */
+function hiddenRow() {
   const list = state.coins.filter((c) => c.archived).sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name, 'uk'));
   if (!list.length) return null;
   const opsOf = (c) => state.ops.filter((o) => o.from === c.id || o.to === c.id);
@@ -2823,14 +2850,14 @@ function hiddenCard() {
         }, icon('close'), 'Видалити'),
         h('button', { type: 'button', class: 'btn', onClick: () => closeSheet() }, 'Скасувати'))));
   };
-  return h('section', { class: 'card set-card' },
+  return setRow('hidden', 'eye', 'Сховані монети', String(list.length), [
     h('p', { class: 'muted small' }, 'Їх немає на головній, але операції лишаються й рахуються. Сховав помилково — «Повернути».'),
     list.map((c) => h('div', { class: 'hidden-row' },
       miniCoin(c),
       h('span', { class: 'hidden-name' }, h('b', {}, c.name),
         h('span', { class: 'muted small' }, `${M.KINDS[c.kind]} · операцій: ${opsOf(c).length}${['account', 'goal', 'debt'].includes(c.kind) ? ` · ${coinMoney(balance(c), c.currency)}` : ''}`)),
       h('button', { type: 'button', class: 'btn', onClick: () => restore(c) }, 'Повернути'),
-      h('button', { type: 'button', class: 'icon-btn', 'aria-label': `Видалити «${c.name}»`, onClick: () => remove(c) }, icon('close')))));
+      h('button', { type: 'button', class: 'icon-btn', 'aria-label': `Видалити «${c.name}»`, onClick: () => remove(c) }, icon('close'))))]);
 }
 
 /**
@@ -2857,44 +2884,73 @@ function wipeAll() {
       h('button', { type: 'button', class: 'btn', onClick: () => closeSheet() }, 'Скасувати'))));
 }
 
-/** «Про застосунок»: автор, що воно таке, де дані, з чого почати — як у hobby-planner і shooting-log. */
-function aboutPanel() {
-  const link = (href, text) => h('a', { href, target: '_blank', rel: 'noopener' }, text);
-  const more = (title, node) => h('details', { class: 'about-more' }, h('summary', {}, title), node);
-  return h('section', { class: 'card set-card' },
-    h('div', { class: 'about-head' },
-      h('img', { class: 'about-avatar', src: './icons/author.jpg', alt: '', width: 64, height: 64, loading: 'lazy' }),
-      h('div', {},
-        h('p', { class: 'muted small' }, 'Марнотрат — облік витрат монетами: перетягнув гроші з рахунку на витрату — записано. Працює без інтернету.'),
-        h('p', { class: 'small about-author' }, 'Автор — ', link('https://github.com/VitaliyLobko', 'Віталій Лобко')))),
-    more('Де мої дані', h('div', { class: 'muted small' },
-      h('p', {}, 'Монети й операції лежать у браузері на цьому телефоні. Сервера в застосунку немає, автор не отримує ні даних, ні статистики.'),
-      h('p', {}, 'Google Диск — за бажанням: дані лягають у файл на твоєму Диску й однакові на всіх твоїх телефонах. Застосунок бачить лише свої файли.'),
-      h('p', {}, 'Резервна копія — «Зберегти копію»: файл JSON, ним же переносиш дані вручну.'))),
-    more('З чого почати', h('ol', { class: 'about-steps' },
-      h('li', {}, 'Встанови застосунок: Android — Chrome → ⋮ → «Встановити застосунок»; iPhone — Safari → «Поділитися» → «На екран „Додому“».'),
-      h('li', {}, 'Довге натискання на монету — режим «Редагування»: назва, іконка, бюджет, переставити, прибрати. «+» у ряду — нова монета.'),
-      h('li', {}, 'Дохід → рахунок, рахунок → витрата чи ціль, рахунок → рахунок: тягни монету пальцем на іншу й введи суму.'),
-      h('li', {}, 'Тап по монеті — її операції. У стрічці свайп вліво — видалити, вправо — змінити.'),
-      h('li', {}, 'Заливка монети витрати знизу — скільки бюджету вже витрачено, сіре згори — що лишилось. Зелена — в темпі, помаранчева — витрачаєш швидше, ніж іде місяць, червона — понад бюджет. Зелений обідок без заливки — бюджету немає.'))),
-    h('p', { class: 'muted small' },
-      link('https://github.com/VitaliyLobko/marnotrat/issues/new', 'Повідомити про помилку'), ' · ',
-      link('https://github.com/VitaliyLobko/marnotrat', 'Вихідний код')));
+// Аватар кліпає, як у Стрілецькому журналі — фото те саме, тож і контури очей ті самі (координати фото 233×233).
+// Повіки — шар SVG поверх фото, обрізаний контуром білка; верхня з опуклою кромкою опускається, нижня підіймається
+// назустріч. Праве око перше: ліве його перекриває.
+const AVATAR_EYES = [
+  { d: 'M114 63L114 65L117 71L117 78L121 78L122 77L126 77L127 76L132 76L135 79L137 79L139 77L140 72L141 71L141 68L140 67L140 64L135 59L131 57L122 57L118 59Z', box: [114, 57, 142, 80] },
+  { d: 'M99 60L98 61L94 61L87 67L85 71L85 79L87 83L90 86L94 88L102 89L110 86L115 79L115 69L109 62Z', box: [85, 60, 116, 90] },
+];
+const AVATAR_SVG = '<svg viewBox="0 0 233 233" aria-hidden="true"><defs>'
+  + AVATAR_EYES.map(({ d }, i) => `<clipPath id="av-eye${i}"><path d="${d}"/></clipPath>`).join('')
+  + '</defs>'
+  + AVATAR_EYES.map(({ box: [x0, y0, x1, y1] }, i) => {
+    const hh = y1 - y0, e = y0 + hh * 0.6, k = hh * 0.26, cx = (x0 + x1) / 2, l = x0 - 3, r = x1 + 3;
+    const edge = `M${l} ${e}Q${cx} ${e + k} ${r} ${e}`;
+    return `<g clip-path="url(#av-eye${i})" fill="#fcd901">`
+      + `<path class="av-lid low" style="--o:${(y1 - e + 3).toFixed(1)}px" d="${edge}V${y1 + 3}H${l}Z"/>`
+      + `<g class="av-lid" style="--o:-${(e + k - y0 + 3).toFixed(1)}px"><path d="M${l} ${y0 - 3}H${r}V${e}Q${cx} ${e + k} ${l} ${e}Z"/>`
+      + `<path d="${edge}" fill="none" stroke="#1d1d1d" stroke-width="2.6" stroke-linecap="round"/></g></g>`;
+  }).join('')
+  + '</svg>';
+
+/** Тап по аватару — кліпнути одразу, не чекаючи свого часу. */
+function avatarHi(e) {
+  const el = e.currentTarget;
+  el.classList.remove('hi');
+  void el.offsetWidth;
+  el.classList.add('hi');
+  clearTimeout(el.hiTimer);
+  el.hiTimer = setTimeout(() => el.classList.remove('hi'), 600);
 }
 
-function aboutCard() {
+/** «Про застосунок» — карткою внизу налаштувань: автор кліпає, версія й оновлення, що це, де дані, з чого почати. */
+function aboutSection() {
+  const link = (href, text) => h('a', { href, target: '_blank', rel: 'noopener' }, text);
+  const more = (title, node) => h('details', { class: 'about-more' }, h('summary', {}, title), node);
   const status = h('p', { class: 'muted small', 'aria-live': 'polite' },
     upd.worker ? 'Нова версія завантажена — оновлення займе секунду, дані залишаться'
       : (upd.checked ? `У тебе остання версія · перевірено о ${upd.checked}` : ''));
-  return h('section', { class: 'card set-card' },
-    h('h2', {}, `Марнотрат ${self.APP_VERSION ?? '?'}`),
-    h('p', { class: 'muted small' }, `Збірка ${self.APP_BUILD ?? '?'}`),
-    status,
-    h('div', { class: 'btn-grid' },
-      upd.worker
-        ? h('button', { type: 'button', class: 'btn primary', onClick: () => upd.worker.postMessage('skipWaiting') }, icon('refresh'), 'Оновити')
-        : h('button', { type: 'button', class: 'btn', onClick: () => checkUpdate(status) }, icon('refresh'), 'Оновлення'),
-      h('button', { type: 'button', class: 'btn', onClick: () => changesSheet(CHANGES.slice(0, 6), 'Що нового') }, icon('star'), 'Що нового')));
+  return h('section', { class: 'set-group' }, h('h2', { class: 'set-caption' }, 'Про застосунок'),
+    h('div', { class: 'card set-card about-card' },
+      h('div', { class: 'about-head' },
+        h('span', { class: 'about-avatar', onClick: avatarHi },
+          h('img', { src: './icons/author.jpg', alt: '', width: 64, height: 64, loading: 'lazy' }),
+          Object.assign(h('span', { class: 'av-live' }), { innerHTML: AVATAR_SVG })),
+        h('div', {},
+          h('h2', {}, 'Марнотрат'),
+          h('p', { class: 'muted small' }, `Версія ${self.APP_VERSION ?? '?'} · збірка ${self.APP_BUILD ?? '?'}`),
+          h('p', { class: 'small about-author' }, 'Автор — ', link('https://github.com/VitaliyLobko', 'Віталій Лобко')))),
+      h('p', { class: 'muted small' }, 'Облік витрат монетами: перетягнув гроші з рахунку на витрату — записано. Працює без інтернету.'),
+      status,
+      h('div', { class: 'btn-grid' },
+        upd.worker
+          ? h('button', { type: 'button', class: 'btn primary', onClick: () => upd.worker.postMessage('skipWaiting') }, icon('refresh'), 'Оновити')
+          : h('button', { type: 'button', class: 'btn', onClick: () => checkUpdate(status) }, icon('refresh'), 'Оновлення'),
+        h('button', { type: 'button', class: 'btn', onClick: () => changesSheet(CHANGES.slice(0, 6), 'Що нового') }, icon('star'), 'Що нового')),
+      more('Де мої дані', h('div', { class: 'muted small' },
+        h('p', {}, 'Монети й операції лежать у браузері на цьому телефоні. Сервера в застосунку немає, автор не отримує ні даних, ні статистики.'),
+        h('p', {}, 'Google Диск — за бажанням: дані лягають у файл на твоєму Диску й однакові на всіх твоїх телефонах. Застосунок бачить лише свої файли.'),
+        h('p', {}, 'Резервна копія — «Копія у файл»: файл JSON, ним же переносиш дані вручну.'))),
+      more('З чого почати', h('ol', { class: 'about-steps' },
+        h('li', {}, 'Встанови застосунок: Android — Chrome → ⋮ → «Встановити застосунок»; iPhone — Safari → «Поділитися» → «На екран „Додому“».'),
+        h('li', {}, 'Довге натискання на монету — режим «Редагування»: назва, іконка, бюджет, переставити, прибрати. «+» у ряду — нова монета.'),
+        h('li', {}, 'Дохід → рахунок, рахунок → витрата чи ціль, рахунок → рахунок: тягни монету пальцем на іншу й введи суму.'),
+        h('li', {}, 'Тап по монеті — її операції. У стрічці свайп вліво — видалити, вправо — змінити.'),
+        h('li', {}, 'Заливка монети витрати знизу — скільки бюджету вже витрачено, сіре згори — що лишилось. Зелена — в темпі, помаранчева — витрачаєш швидше, ніж іде місяць, червона — понад бюджет. Зелений обідок без заливки — бюджету немає.'))),
+      h('div', { class: 'about-links' },
+        link('https://github.com/VitaliyLobko/marnotrat/issues/new', 'Повідомити про помилку'),
+        link('https://github.com/VitaliyLobko/marnotrat', 'Вихідний код'))));
 }
 
 /** Новий worker після reg.update(): дочекатись, поки встановиться (або відпаде). */
@@ -2951,7 +3007,7 @@ function showWhatsNew() {
 }
 
 /** «Google Диск»: з ботом — щоденна копія, без бота — синхронізація між телефонами. */
-function syncCard() {
+function driveRow() {
   const on = Sync.syncOn();
   const last = Sync.lastSync();
   const when = last ? new Date(last).toLocaleString('uk-UA', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }) : '';
@@ -2974,8 +3030,8 @@ function syncCard() {
     h('div', { class: 'btn-grid' },
       h('button', { type: 'button', class: 'btn danger', onClick: () => { closeSheet(); Sync.disconnect(); render(); } }, 'Відключити'),
       h('button', { type: 'button', class: 'btn', onClick: closeSheet }, 'Залишити'))));
-  return h('section', { class: 'card set-card' },
-    h('h2', {}, Bot.botConfig() ? 'Google Диск · щоденна копія' : 'Google Диск · синхронізація'),
+  const value = !on ? 'Вимкнено' : sync.error ? 'Помилка' : last ? shortWhen(last) : 'Ще не було';
+  return setRow('drive', 'cloud', Bot.botConfig() ? 'Google Диск · копія' : 'Google Диск', value, [
     on ? h('p', { class: sync.error ? 'small error-text' : 'muted small' }, sync.error ? `Помилка: ${sync.error}` : last ? `Остання копія: ${when}` : 'Копії ще не було') : null,
     on ? null : h('p', { class: 'muted small' }, 'Копія даних раз на день у файлі на твоєму Google Диску.'),
     on
@@ -2984,7 +3040,8 @@ function syncCard() {
         h('button', { type: 'button', class: 'btn', onClick: restore }, icon('undo'), 'Відновити'),
         h('button', { type: 'button', class: 'btn', onClick: off }, icon('close'), 'Відключити'))
       : h('div', { class: 'btn-grid' }, h('button', { type: 'button', class: 'btn', onClick: connect }, icon('refresh'), 'Підключити Диск')),
-    moreText('Файл marnotrat-sync.json на твоєму Google Диску; там же адреса сервера й ключ доступу для інших пристроїв. Застосунок бачить лише свої файли.'));
+    moreText('Файл marnotrat-sync.json на твоєму Google Диску; там же адреса сервера й ключ доступу для інших пристроїв. Застосунок бачить лише свої файли.')],
+  { tone: on ? (sync.error ? 'bad' : 'ok') : '' });
 }
 
 const backupData = () => ({ app: 'marnotrat', version: self.APP_VERSION, exported: new Date().toISOString(), ...state });
