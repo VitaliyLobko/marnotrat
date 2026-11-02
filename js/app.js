@@ -1141,6 +1141,24 @@ async function removeCoin(orig) {
 const PAGE_EDGE = 28;
 const PAGE_WAIT = 600;
 
+// Примагнічування: ціль ловить монету за стільки діаметрів від свого центру, копія тягнеться до неї на таку частку
+const MAGNET_REACH = 0.9;
+const MAGNET_PULL = 0.35;
+const magnetOn = () => recall('magnet') !== '0';
+
+/** Найближча ціль у межах досяжності магніту; монети з інших сторінок ряду (за краєм екрана) не беремо. */
+function nearestDrop(x, y) {
+  let best = null;
+  let bestD = Infinity;
+  for (const f of document.querySelectorAll('.coin.drop-ok .coin-face')) {
+    const r = f.getBoundingClientRect();
+    if (r.left < 0 || r.right > innerWidth || r.top < 0 || r.bottom > innerHeight) continue;
+    const d = Math.hypot(x - (r.left + r.width / 2), y - (r.top + r.height / 2));
+    if (d < r.width * MAGNET_REACH && d < bestD) { best = f.closest('.coin'); bestD = d; }
+  }
+  return best;
+}
+
 const LONG_PRESS = 500;
 // Велику витрату записує утримання кнопки стільки мілісекунд
 const HOLD_MS = 1000;
@@ -1190,13 +1208,29 @@ function bindCoin(el, face, c) {
       if (editing()) {
         if (t && t !== drag.over) { liveMove(el, t); vibrate(10); }
         drag.over = t ?? null;
+        placeGhost();
         return;
       }
-      if (t !== drag.over) {
+      // Повз монету — магніт бере найближчу; ціль під пальцем росте, тож і відпускає її далі, ніж ловить
+      const near = t ?? (magnetOn() ? nearestDrop(at.x, at.y) : null);
+      if (near !== drag.over) {
         drag.over?.classList.remove('drop-over');
-        drag.over = t ?? null;
+        drag.over = near ?? null;
         if (drag.over) { drag.over.classList.add('drop-over'); vibrate(15); }
       }
+      placeGhost();
+    };
+    // Копія монети — під пальцем, а з магнітом трохи тягнеться до спійманої цілі
+    const placeGhost = () => {
+      let { x, y } = at;
+      const f = !editing() && magnetOn() ? drag.over?.querySelector('.coin-face') : null;
+      if (f) {
+        const r = f.getBoundingClientRect();
+        x += (r.left + r.width / 2 - x) * MAGNET_PULL;
+        y += (r.top + r.height / 2 - y) * MAGNET_PULL;
+      }
+      drag.ghost.style.left = `${x}px`;
+      drag.ghost.style.top = `${y}px`;
     };
     const scrollLoop = () => {
       if (!drag) return;
@@ -1259,8 +1293,6 @@ function bindCoin(el, face, c) {
       }
       if (!drag) return;
       ev.preventDefault();
-      drag.ghost.style.left = `${at.x}px`;
-      drag.ghost.style.top = `${at.y}px`;
       findTarget();
     };
     const onUp = (ev) => {
@@ -1588,16 +1620,27 @@ function openAmount({ from, to, op = null, preset = null, copy = null }) {
   };
 
   const key = (label, fn, aria = null, cls = '') => h('button', { type: 'button', class: cls, 'aria-label': aria ?? label, onClick: fn }, label);
+  // Цифри й дії — з дотику, як на клавіатурі телефона: click губиться, коли палець ковзнув
+  // чи другий палець торкнувся раніше, ніж відпустили перший. З клавіатури (detail 0) — звичайний click.
+  const tapKey = (label, fn, aria = null) => {
+    const b = h('button', { type: 'button', 'aria-label': aria ?? label, onClick: (e) => { if (!e.detail) fn(); } }, label);
+    b.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      fn();
+    });
+    return b;
+  };
   const pad = h('div', { class: 'pad' },
     h('div', { class: 'pad-digits' },
-      ['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((k) => key(k, () => digit(k))),
-      key(',', () => digit(','), 'Кома'), key('0', () => digit('0')), key(icon('backspace'), back, 'Стерти')),
+      ['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((k) => tapKey(k, () => digit(k))),
+      tapKey(',', () => digit(','), 'Кома'), tapKey('0', () => digit('0')), tapKey(icon('backspace'), back, 'Стерти')),
     h('div', { class: 'pad-ops' },
       key(icon('comment'), () => showPanel('comment'), 'Деталі'),
       key(icon('refresh'), () => (canRepeat ? showPanel('repeat') : toast('Повтор задається в першій операції — відкрий її')), 'Повторювати'),
-      key('−', () => operator('−'), 'Мінус'), key('%', () => operator('%'), 'Відсоток'),
-      key('+', () => operator('+'), 'Плюс'), key('×', () => operator('×'), 'Помножити'),
-      key('=', equals, 'Дорівнює'), key('÷', () => operator('÷'), 'Поділити')));
+      tapKey('−', () => operator('−'), 'Мінус'), tapKey('%', () => operator('%'), 'Відсоток'),
+      tapKey('+', () => operator('+'), 'Плюс'), tapKey('×', () => operator('×'), 'Помножити'),
+      tapKey('=', equals, 'Дорівнює'), tapKey('÷', () => operator('÷'), 'Поділити')));
 
   const dates = op || preset
     ? h('div', { class: `dates${op ? ' with-del' : ''}` }, h('button', {
@@ -2735,6 +2778,14 @@ function themeRow() {
     h('p', { class: 'muted small' }, 'Нічна — усе червоним, щоб не збивати нічний зір. Фосфор, Бурштин і Білий фосфор — як старі монітори-кінескопи.')]);
 }
 
+/** Примагнічування монети до цілі при перетягуванні — на цьому телефоні. */
+function magnetRow() {
+  const on = magnetOn();
+  return setRow('magnet', 'target', 'Примагнічування', on ? 'Увімкнено' : 'Вимкнено', [
+    chips([['1', 'Увімкнено'], ['0', 'Вимкнено']], on ? '1' : '0', (v) => { remember('magnet', v); render(); }),
+    h('p', { class: 'muted small' }, 'Монета ловиться найближчою ціллю, навіть коли палець трохи мимо, і копія тягнеться до неї. Вимкнено — ціль лише та, що просто під пальцем.')]);
+}
+
 /** Фон під картками — плитки з самим фоном, щоб видно було до вибору; набір — для поточної теми, у спецрежимах рядка немає. */
 function backdropRow() {
   const theme = document.documentElement.dataset.theme;
@@ -2808,7 +2859,7 @@ function viewSettings() {
   // Від того, що чіпають найчастіше, до разового; «Про застосунок» — карткою внизу
   return h('div', { class: 'page settings' },
     setList('Облік', [periodRow(), ratesRow(), tagsRow(), hiddenRow()]),
-    setList('Вигляд і вхід', [themeRow(), backdropRow(), lockRow()]),
+    setList('Вигляд і вхід', [themeRow(), backdropRow(), magnetRow(), lockRow()]),
     setList('Синхронізація', [serverRow(), driveRow()]),
     setList('На телефоні', [widgetRow(), telegramRow()]),
     setList('Дані', [backupRow(), csvRow(), wipeRow()]),
