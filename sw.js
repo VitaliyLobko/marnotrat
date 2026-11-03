@@ -36,6 +36,7 @@ const ASSETS = [
   './icons/icon-maskable-512-v2.png',
   './icons/apple-touch-icon.png',
   './icons/author.jpg',
+  './icons/cat-portrait.png',
 ];
 
 // Файли — повз HTTP-кеш браузера: GitHub Pages віддає max-age=600,
