@@ -1698,6 +1698,9 @@ function openAmount({ from, to, op = null, preset = null, copy = null }) {
         h('div', { class: 'btn-grid' }, h('button', {
           type: 'button', class: 'btn primary', onClick: () => { d.comment = ta.value; d.warranty = until.value; hidePanel(); },
         }, icon('check'), 'Готово'))));
+      // Одразу в коментар: фокус у тому ж натисканні, інакше Android не відкриє клавіатуру
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
       return;
     }
     showTags();
