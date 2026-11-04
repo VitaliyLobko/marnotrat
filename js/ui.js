@@ -127,6 +127,64 @@ export function closeSheet() {
 
 export const sheetOpen = () => Boolean(openSheet);
 
+// Пошук у виборі — коли пунктів більше, ніж влазить на екран
+const PICK_SEARCH_FROM = 12;
+
+/**
+ * Вибір зі списку замість системного select: поле зі стрілкою, тап — шторка з групами й галочкою.
+ * sections — [{ title?, items: [{ value, label, lead? }] }]; grid — пункти плиткою (числа); note — підказка під списком.
+ * shown — що писати в полі, якщо не сам підпис вибраного пункту.
+ */
+export function picker(opts) {
+  const { title, value, sections, shown = '' } = opts;
+  const cur = sections.flatMap((s) => s.items).find((it) => it.value === value);
+  return h('button', {
+    type: 'button', class: 'field pick-field', 'aria-haspopup': 'dialog', 'aria-label': `${title}: ${shown || cur?.label || '—'}`,
+    onClick: () => pickSheet(opts),
+  }, cur?.lead ? cur.lead.cloneNode(true) : null, h('span', { class: 'pick-shown' }, shown || cur?.label || '—'), icon('chevron', 'ico pick-chev'));
+}
+
+/** Сама шторка вибору — і для поля picker(), і для рядка, що відкриває її без поля (налаштування). */
+export function pickSheet({ title, value, sections, onPick, grid = false, note = '' }) {
+  const all = sections.flatMap((s) => s.items);
+  const choose = (v) => {
+    close();
+    if (v !== value) onPick(v);
+  };
+  const option = (it) => {
+    const on = it.value === value;
+    return h('button', {
+      type: 'button', class: `pick-opt${on ? ' on' : ''}`, role: 'option', 'aria-selected': String(on), onClick: () => choose(it.value),
+    }, grid ? null : it.lead ?? null, h('span', { class: 'pick-label' }, it.label), grid || !on ? null : icon('check', 'ico pick-check'));
+  };
+  const groups = sections.filter((s) => s.items.length).map((s) => {
+    const list = h('div', { class: grid ? 'pick-grid' : 'pick-list', role: 'listbox', 'aria-label': s.title ?? title }, s.items.map(option));
+    return h('section', { class: 'pick-group' }, s.title ? h('h3', { class: 'pick-caption' }, s.title) : null, list);
+  });
+  const empty = h('p', { class: 'pick-empty muted', hidden: true }, 'Нічого не знайдено');
+  const search = !grid && all.length > PICK_SEARCH_FROM ? h('input', {
+    type: 'search', class: 'field pick-search', placeholder: 'Знайти', 'aria-label': 'Знайти у списку', enterkeyhint: 'search',
+    onInput: () => {
+      const q = search.value.trim().toLocaleLowerCase('uk');
+      let any = false;
+      for (const g of groups) {
+        let seen = 0;
+        for (const b of g.querySelectorAll('.pick-opt')) {
+          const hit = !q || b.textContent.toLocaleLowerCase('uk').includes(q);
+          b.hidden = !hit;
+          if (hit) seen += 1;
+        }
+        g.hidden = !seen;
+        any ||= Boolean(seen);
+      }
+      empty.hidden = any;
+    },
+  }) : null;
+  const close = sheet(title, h('div', { class: 'pick-body' }, search, groups, empty, note ? h('p', { class: 'pick-note muted small' }, note) : null), { cls: 'pick-sheet' });
+  // Вибране — посередині, щоб не гортати до нього довгий список
+  document.querySelector('.pick-sheet .pick-opt.on')?.scrollIntoView({ block: 'center' });
+}
+
 /** Рядок перемикачів: items — [[значення, підпис]]. */
 export function chips(items, value, onChange) {
   const row = h('div', { class: 'chips', role: 'group' });

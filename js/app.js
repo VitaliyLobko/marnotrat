@@ -9,7 +9,7 @@ import { cursors, exchange } from './cloud.js';
 import { CHANGES, changesSince } from './changes.js';
 import * as Csv from './csv.js';
 import { initLock, lockOn, lockDelay, lockAvailable, enableLock, disableLock, setLockDelay, LOCK_DELAYS } from './lock.js';
-import { $, h, icon, hasIcon, toast, sheet, closeSheet, chips, swipeStep, vibrate, reduceMotion, wheelStrip } from './ui.js';
+import { $, h, icon, hasIcon, toast, sheet, closeSheet, chips, picker, pickSheet, swipeStep, vibrate, reduceMotion, wheelStrip } from './ui.js';
 
 const state = { coins: [], ops: [], meta: [] };
 let view = 'main';
@@ -2723,19 +2723,19 @@ async function fetchRates(force = false) {
 
 function periodRow() {
   const day = startDay();
-  const select = h('select', {
-    class: 'field', 'aria-label': 'День початку місяця',
-    onChange: async (e) => {
-      await save({ meta: { put: [{ id: 'period', day: Number(e.target.value) }] } }, { redraw: false });
+  // Рядок одразу відкриває дні плиткою, як у календарі: 28 рядків списку довелося б гортати
+  const choose = () => pickSheet({
+    title: 'Початок місяця', value: day, grid: true,
+    note: `З якого дня рахувати бюджети й звіти — зручно з дня зарплати. 1 — календарний місяць; після 28-го не буває, бо в лютому таких днів нема.${day === 1 ? '' : ` Зараз: ${periodTitle(currentPeriod())}.`}`,
+    sections: [{ items: Array.from({ length: 28 }, (_, i) => ({ value: i + 1, label: String(i + 1) })) }],
+    onPick: async (v) => {
+      await save({ meta: { put: [{ id: 'period', day: v }] } }, { redraw: false });
       reportMonth = currentPeriod();
       render();
-      toast(Number(e.target.value) === 1 ? 'Місяць — календарний' : `Місяць обліку — з ${e.target.value}-го`);
+      toast(v === 1 ? 'Місяць — календарний' : `Місяць обліку — з ${v}-го`);
     },
-  }, Array.from({ length: 28 }, (_, i) => h('option', { value: String(i + 1), selected: i + 1 === day }, i === 0 ? '1 — календарний місяць' : `${i + 1}-го числа`)));
-  return setRow('period', 'calendar', 'Початок місяця', day === 1 ? 'Календарний' : `З ${day}-го`, [
-    h('p', { class: 'muted small' }, 'З якого дня рахувати бюджети й звіти — зручно з дня зарплати.'),
-    select,
-    day === 1 ? null : h('p', { class: 'muted small' }, `Зараз: ${periodTitle(currentPeriod())}`)]);
+  });
+  return setRow('period', 'calendar', 'Початок місяця', day === 1 ? 'Календарний' : `З ${day}-го`, null, { onTap: choose });
 }
 
 /** Курси до гривні: свої чи НБУ. Поле не перемальовує екран — інакше фокус злітав би на півдорозі до другого курсу. */
@@ -2878,8 +2878,15 @@ function setList(title, rows) {
 /**
  * Рядок налаштувань: іконка, назва й поточне значення — видно, що де стоїть, нічого не відкриваючи.
  * Тап розгортає керування під рядком; відкритий завжди один, і його пам'ятаємо між перемальовуваннями.
+ * onTap — рядок нічого не розгортає, а відкриває шторку (вибір зі списку).
  */
-function setRow(key, ico, title, value, body, { tone = '', danger = false } = {}) {
+function setRow(key, ico, title, value, body, { tone = '', danger = false, onTap = null } = {}) {
+  if (onTap) {
+    return h('div', { class: `set-row${danger ? ' danger' : ''}` }, h('button', {
+      type: 'button', class: 'set-head', 'aria-haspopup': 'dialog', onClick: onTap,
+    }, h('span', { class: 'set-ico' }, icon(ico)), h('span', { class: 'set-title' }, title),
+    value ? h('span', { class: `set-val${tone ? ` ${tone}` : ''}` }, value) : null, icon('chevron', 'ico set-chev')));
+  }
   const open = recall('set-open') === key;
   const row = h('div', { class: `set-row${open ? ' open' : ''}${danger ? ' danger' : ''}` });
   const head = h('button', {
@@ -3516,16 +3523,21 @@ function histSeries(key) {
 
 /** Вибір ряду: підсумки, витрати, доходи, теги — списком, бо монет і тегів багато. */
 function histSelect() {
-  const opt = (v, label) => h('option', { value: v, selected: v === histKey }, label);
-  const group = (label, items) => (items.length ? h('optgroup', { label }, items) : null);
-  return h('select', {
-    class: 'field', 'aria-label': 'Що показати',
-    onChange: (e) => { histKey = e.target.value; histPick = null; render(); },
-  },
-  group('Підсумки', [opt('exp', 'Усі витрати'), opt('inc', 'Усі доходи'), opt('net', 'Чистий дохід (доходи − витрати)')]),
-  group('Витрати', coinsOf('expense').map((c) => opt(`c:${c.id}`, c.name))),
-  group('Доходи', coinsOf('income').map((c) => opt(`c:${c.id}`, c.name))),
-  group('Теги', allTags().map((t) => opt(`t:${t}`, `#${t}`))));
+  const sum = (ico) => h('span', { class: 'pick-ico' }, icon(ico));
+  const coin = (c) => ({ value: `c:${c.id}`, label: c.name, lead: miniCoin(c) });
+  return picker({
+    // Монету могли прибрати, а тег — злити: тоді в полі назва з самого ряду
+    title: 'Що показати', value: histKey, shown: histSeries(histKey).name,
+    onPick: (v) => { histKey = v; histPick = null; render(); },
+    sections: [
+      { title: 'Підсумки', items: [
+        { value: 'exp', label: 'Усі витрати', lead: sum('shopping-cart') },
+        { value: 'inc', label: 'Усі доходи', lead: sum('banknote') },
+        { value: 'net', label: 'Чистий дохід (доходи − витрати)', lead: sum('scale') }] },
+      { title: 'Витрати', items: coinsOf('expense').map(coin) },
+      { title: 'Доходи', items: coinsOf('income').map(coin) },
+      { title: 'Теги', items: allTags().map((t) => ({ value: `t:${t}`, label: `#${t}`, lead: sum('tag') })) }],
+  });
 }
 
 /** Стовпчик із заокругленим кінцем далі від нуля: y0 — нуль, y1 — значення. */

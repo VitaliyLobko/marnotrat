@@ -536,6 +536,45 @@ a { color: var(--brand-text); }
   width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 10px;
   background: var(--surface-2); color: var(--text); font: inherit;
 }
+/* вибір зі списку: поле зі стрілкою замість системного select, сам список — у шторці */
+.pick-field {
+  display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 6px 12px; text-align: left; cursor: pointer;
+  -webkit-tap-highlight-color: transparent; transition: border-color .15s ease, background-color .15s ease;
+}
+.pick-field:active { background: color-mix(in srgb, var(--brand) 8%, var(--surface-2)); }
+.pick-field:focus-visible { outline: 2px solid var(--brand-text); outline-offset: 2px; }
+.pick-field .mini-coin, .pick-opt .mini-coin { width: 30px; }
+.pick-shown { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.pick-chev { color: var(--muted); }
+.pick-chev svg { width: 20px; height: 20px; }
+.pick-ico { flex: none; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px;
+  background: color-mix(in srgb, var(--brand) 14%, transparent); color: var(--brand-text); }
+.pick-ico .ico svg { width: 17px; height: 17px; }
+.pick-body { display: flex; flex-direction: column; gap: 4px; }
+.pick-search { position: sticky; top: -8px; z-index: 1; margin-bottom: 6px; box-shadow: 0 6px 8px -6px var(--surface); }
+.pick-group + .pick-group { margin-top: 10px; }
+.pick-caption { margin: 0 4px 6px; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.pick-list { display: flex; flex-direction: column; overflow: hidden; border-radius: 12px; background: var(--surface-2); }
+.pick-opt {
+  display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px; padding: 8px 14px;
+  border: 0; background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.pick-list .pick-opt + .pick-opt { border-top: 1px solid var(--line); }
+.pick-opt:active { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.pick-opt:focus-visible { outline: 2px solid var(--brand-text); outline-offset: -2px; }
+.pick-label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.pick-list .pick-opt.on { background: color-mix(in srgb, var(--brand) 12%, transparent); font-weight: 600; }
+.pick-check { color: var(--brand-text); }
+.pick-check svg { width: 20px; height: 20px; stroke-width: 2.4; }
+/* числа плиткою, сім у ряд — як тиждень у календарі */
+.pick-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.pick-grid .pick-opt {
+  justify-content: center; min-height: 44px; aspect-ratio: 1; padding: 0; border-radius: 50%;
+  background: var(--surface-2); font-variant-numeric: tabular-nums;
+}
+.pick-grid .pick-opt .pick-label { flex: none; }
+.pick-grid .pick-opt.on { background: var(--brand); color: var(--brand-ink); font-weight: 700; }
+.pick-empty, .pick-note { margin: 10px 4px 0; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { padding: 8px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-2); }
 .chip.on { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); }
