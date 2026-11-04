@@ -482,6 +482,19 @@ function usualPair(type) {
   return src && dst ? { from: src.id, to: dst.id } : null;
 }
 
+/** Витрата в монету to: рахунок — той, з якого в неї платили найчастіше за 90 днів, інакше перший. Нема монети — null. */
+function pairInto(to) {
+  if (!state.coins.some((c) => c.id === to && c.kind === 'expense' && !c.archived)) return null;
+  const since = M.addDays(M.ymd(), -90);
+  const count = new Map();
+  for (const op of state.ops) {
+    if (op.to !== to || op.date < since || coinOr(op.from).kind !== 'account' || coinOr(op.from).archived) continue;
+    count.set(op.from, (count.get(op.from) ?? 0) + 1);
+  }
+  const from = [...count].sort((a, b) => b[1] - a[1])[0]?.[0] ?? coinsOf('account')[0]?.id;
+  return from ? { from, to } : null;
+}
+
 /** «Віджет на головний екран»: є застосунок — передати адресу й ключ, немає — Chrome качає APK. */
 function widgetRow() {
   const link = Widget.setupLink();
@@ -4115,9 +4128,11 @@ let routed = false;
  */
 function route(before = null) {
   let [key, arg] = location.hash.slice(1).split('/');
-  // Кнопки віджета Android: #add/expense, #add/income — екран суми зі звичними монетами поверх головної
+  // Кнопки віджета Android: #add/expense, #add/income — екран суми зі звичними монетами поверх головної;
+  // #add/<id витрати> — віджет 1×1 «Швидка витрата»: одразу в цю монету
   if (key === 'add') {
-    const pair = usualPair(arg === 'income' ? 'income' : 'expense');
+    const pair = arg === 'income' || arg === 'expense' || !arg ? usualPair(arg === 'income' ? 'income' : 'expense')
+      : pairInto(decodeURIComponent(arg)) ?? usualPair('expense');
     history.replaceState(null, '', '#main');
     [key, arg] = ['main', undefined];
     if (pair) setTimeout(() => openAmount(pair));
