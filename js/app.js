@@ -502,7 +502,7 @@ function widgetRow() {
     h('p', { class: 'muted small' }, link
       ? 'Баланс, скільки можна на день, сьогоднішні витрати й тиждень — на головному екрані Android.'
       : 'Віджет бере цифри з бази на сервері — спершу ввімкни «База на сервері».'),
-    link ? h('div', { class: 'btn-grid' },
+    link ? h('div', { class: 'btn-grid stack' },
       h('a', { class: 'btn primary', href: link }, icon('smartphone'), 'Підключити'),
       h('a', { class: 'btn', href: Widget.APK_URL }, icon('archive'), 'Завантажити APK')) : null,
     link ? moreText(
