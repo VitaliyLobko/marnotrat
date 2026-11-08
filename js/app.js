@@ -495,6 +495,24 @@ function pairInto(to) {
   return from ? { from, to } : null;
 }
 
+/**
+ * Набране в шторці віджета перед «Більше» — щоб не вводити вдруге: рахунок (живий і у валюті витрати),
+ * сума (лише коли валюти збігаються — інакше вона не в тій валюті), коментар і теги. Нічого нема — {}.
+ */
+function widgetDraft(pair, draft) {
+  if (!draft) return {};
+  let q;
+  try { q = new URLSearchParams(draft); } catch { return {}; }
+  const dst = coinOr(pair.to);
+  const acc = state.coins.find((c) => c.id === q.get('f') && c.kind === 'account' && !c.archived && c.currency === dst.currency);
+  const from = acc?.id ?? pair.from;
+  const amount = coinOr(from).currency === dst.currency ? M.round2(Number(q.get('a')) || 0) : 0;
+  const tags = dst.kind === 'expense' ? normTags(q.getAll('t')) : [];
+  const comment = String(q.get('c') ?? '').trim().slice(0, 500);
+  if (!amount && !tags.length && !comment && !acc) return {};
+  return { from, copy: { amount: amount > 0 ? amount : 0, tags, comment } };
+}
+
 /** «Віджет на головний екран»: є застосунок — передати адресу й ключ, немає — Chrome качає APK. */
 function widgetRow() {
   const link = Widget.setupLink();
@@ -4127,15 +4145,16 @@ let routed = false;
  * з монети — монета розростається. before — що прибрати вже на новому кадрі (меню).
  */
 function route(before = null) {
-  let [key, arg] = location.hash.slice(1).split('/');
+  let [key, arg, draft] = location.hash.slice(1).split('/');
   // Кнопки віджета Android: #add/expense, #add/income — екран суми зі звичними монетами поверх головної;
-  // #add/<id витрати> — віджет 1×1 «Швидка витрата»: одразу в цю монету
+  // #add/<id витрати> — віджет 1×1 «Швидка витрата»: одразу в цю монету;
+  // #add/<id витрати>/a=…&c=…&t=…&f=… — «Більше» в шторці віджета: набране там (сума, коментар, теги, рахунок)
   if (key === 'add') {
     const pair = arg === 'income' || arg === 'expense' || !arg ? usualPair(arg === 'income' ? 'income' : 'expense')
       : pairInto(decodeURIComponent(arg)) ?? usualPair('expense');
     history.replaceState(null, '', '#main');
     [key, arg] = ['main', undefined];
-    if (pair) setTimeout(() => openAmount(pair));
+    if (pair) setTimeout(() => openAmount({ ...pair, ...widgetDraft(pair, draft) }));
   }
   const next = VIEWS[key] ? key : 'main';
   const changed = next !== view || (next === 'feed' && (arg ?? null) !== feedCoin);
