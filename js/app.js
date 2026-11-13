@@ -1130,10 +1130,17 @@ function removeHolder(c) {
   const others = coinsOf('account').filter((a) => a.id !== c.id);
   const move = async (acc) => {
     close();
-    const op = { id: uid(), from: c.id, to: acc.id, amount: left, date: M.ymd(), tags: [], comment: `Закрито «${c.name}»`, created: Date.now() };
-    if (acc.currency !== c.currency) op.amountTo = M.round2(left * rate(c.currency) / rate(acc.currency));
+    // Рахунок у мінусі: не переказ з від'ємною сумою, а звичайний переказ з іншого рахунку, що закриває мінус
+    const neg = left < 0;
+    const sum = Math.abs(left);
+    const other = acc.currency !== c.currency ? M.round2(sum * rate(c.currency) / rate(acc.currency)) : null;
+    const op = neg
+      ? { id: uid(), from: acc.id, to: c.id, amount: other ?? sum, date: M.ymd(), tags: [], comment: `Закрито «${c.name}»`, created: Date.now() }
+      : { id: uid(), from: c.id, to: acc.id, amount: sum, date: M.ymd(), tags: [], comment: `Закрито «${c.name}»`, created: Date.now() };
+    if (other != null) op.amountTo = neg ? sum : other;
     await save({ ops: { put: [op] }, coins: { put: [{ ...c, archived: true }] } });
-    toast(`${M.money(left, c.currency)} → ${acc.name}, «${c.name}» сховано`, {
+    toast(neg ? `Мінус ${M.money(sum, c.currency)} закрито з «${acc.name}», «${c.name}» сховано`
+      : `${M.money(sum, c.currency)} → ${acc.name}, «${c.name}» сховано`, {
       label: 'Скасувати', run: () => save({ ops: { del: [op.id] }, coins: { put: [{ ...c }] } }),
     });
   };
@@ -1143,6 +1150,7 @@ function removeHolder(c) {
     toast(`«${c.name}» сховано`, { label: 'Скасувати', run: () => save({ coins: { put: [{ ...c }] } }) });
   };
   const text = c.kind === 'goal' ? `У цілі відкладено ${M.money(left, c.currency)}. На який рахунок їх повернути?`
+    : c.kind === 'account' && left < 0 ? `На рахунку мінус ${M.money(left, c.currency)}. З якого рахунку його закрити? Якщо просто сховати — мінус лишиться в «Баланс», але рахунку на головній не буде.`
     : c.kind === 'account' ? `На рахунку ${M.money(left, c.currency)}. Перенести їх на інший рахунок? Якщо просто сховати — гроші лишаться в «Баланс», але рахунку на головній не буде.`
       : `${left > 0 ? `«${c.name}» ще винен тобі` : `Ти ще винен «${c.name}»`} ${M.money(Math.abs(left), c.currency)}. Сховати борг усе одно?`;
   const close = sheet(`Прибрати «${c.name}»?`, h('div', { class: 'form' },
@@ -3625,7 +3633,7 @@ function viewHistory() {
       const x = i * slot + (slot - bw) / 2;
       const v = vals[i];
       const now = k === cur;
-      const label = `${periodTitle(k)}: ${M.money(Math.round(v))}`;
+      const label = `${periodTitle(k)}: ${s.kind === 'net' ? signedUah(Math.round(v)) : M.money(Math.round(v))}`;
       return sv('g', { class: `hist-col${k === pick ? ' on' : ''}${now ? ' now' : ''}` },
         now && fc ? sv('path', { d: barPath(x, bw, y0, y(fc)), class: 'hist-fc' }) : null,
         sv('path', { d: barPath(x, bw, y0, y(v)), fill: fill(v), class: 'hist-bar' }),
