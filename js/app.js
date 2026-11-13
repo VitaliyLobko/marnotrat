@@ -2200,7 +2200,7 @@ function feedList(lazy = false) {
       const { expense, income } = totals(date);
       const change = income - expense;
       foot = h('div', { class: 'day-foot' },
-        h('div', {}, h('b', {}, M.money(Math.round(balAt(date)))), h('span', {}, 'на рахунках')),
+        h('div', {}, h('b', {}, coinMoney(Math.round(balAt(date)), 'UAH')), h('span', {}, 'на рахунках')),
         h('div', {}, h('b', { class: change > 0 ? 'plus' : change < 0 ? 'minus' : '' }, signedUah(change)), h('span', {}, 'зміна')));
     }
     return h('section', { class: 'day' }, h('h2', { class: 'day-title' }, M.dayHead(date, today)),
@@ -4031,7 +4031,7 @@ function openMenu() {
   const close = sheet('Меню', h('nav', { class: 'menu' },
     h('div', { class: 'menu-head' },
       h('img', { class: 'menu-logo', src: './icons/icon-192-v2.png', alt: '', width: 44, height: 44 }),
-      h('span', {}, h('b', {}, 'Марнотрат'), h('span', {}, `на рахунках ${M.money(Math.round(totalBalance()))}`))),
+      h('span', {}, h('b', {}, 'Марнотрат'), h('span', {}, `на рахунках ${coinMoney(Math.round(totalBalance()), 'UAH')}`))),
     remind.length ? h('div', { class: 'menu-group remind' }, h('p', { class: 'menu-cap' }, 'Нагадування'), remind) : null,
     MENU.map(([title, items]) => h('div', { class: 'menu-group' }, h('p', { class: 'menu-cap' }, title), items.map(item))),
     h('div', { class: 'menu-foot' }, item(['settings', 'gear', 'Налаштування']), h('p', { class: 'menu-ver' }, `версія ${self.APP_VERSION}`))),
